@@ -1,0 +1,130 @@
+version: '3.8'
+
+services:
+  # Qdrant Vector Database
+  qdrant:
+    image: qdrant/qdrant:v1.7.0
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # RAG Resolver Service
+  rag-resolver:
+    build:
+      context: .
+      dockerfile: Dockerfile.resolver
+    ports:
+      - "8080:8080"
+    environment:
+      # MongoDB Configuration
+      - MONGO_URI=mongodb://admin:SKMO7frslkjsdh546fchjkhg@35.94.146.89:27017/
+      - DB_NAME=k8s_logs
+      - DEBUG_COLLECTION=debug_results
+      
+      # Qdrant Configuration
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_COLLECTION=k8s_resolutions
+      - VECTOR_SIZE=1536
+      
+      # AWS Configuration
+      - AWS_REGION=us-west-2
+      - AWS_PROFILE=finchat
+      - EKS_CLUSTER_NAME=my-eks-cluster
+      - BEDROCK_MODEL_ID=openai.gpt-oss-20b-1:0
+      - BEDROCK_EMBEDDING_MODEL=amazon.titan-embed-text-v1
+      
+      # Service Configuration
+      - SERVICE_NAME=k8s-rag-resolver
+      - SERVICE_PORT=8080
+      - LOG_LEVEL=INFO
+      - AUTO_EXECUTE_SAFE_COMMANDS=true
+      - MAX_CONCURRENT_RESOLUTIONS=5
+      
+      # RAG Configuration
+      - RAG_SIMILARITY_THRESHOLD=0.7
+      - RAG_MAX_CONTEXT_DOCS=5
+      - RAG_CHUNK_SIZE=1000
+      
+      # MCP Configuration
+      - MCP_ALLOWED_NAMESPACES=default,kube-system,production
+      - MCP_TIMEOUT=30
+      - MCP_MAX_RETRIES=3
+    volumes:
+      - ~/.aws:/root/.aws:ro
+      - ~/.kube:/root/.kube:ro
+      - ./logs:/app/logs
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis for caching (optional)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Prometheus for monitoring (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    restart: unless-stopped
+
+  # Grafana for visualization (optional)
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    name: k8s-resolver-network
