@@ -71,13 +71,13 @@ def load_resolver_config() -> ResolverConfig:
         debug_collection=os.getenv("DEBUG_COLLECTION", "debug_results")
     )
     
-    # Qdrant configuration
+    # Qdrant configuration - FIXED: Consistent vector size for Titan embeddings
     qdrant_config = QdrantConfig(
         host=os.getenv("QDRANT_HOST", "35.94.146.89"),
         port=int(os.getenv("QDRANT_PORT", "6333")),
         api_key=os.getenv("QDRANT_API_KEY"),  # Optional for local/cloud
         collection_name=os.getenv("QDRANT_COLLECTION", "k8s_resolutions"),
-        vector_size=int(os.getenv("VECTOR_SIZE", "1024")),  # Updated to match actual embedding size
+        vector_size=int(os.getenv("VECTOR_SIZE", "1024")),  # FIXED: 1024 for Titan v2
         distance_metric=os.getenv("DISTANCE_METRIC", "cosine")
     )
     
@@ -138,6 +138,51 @@ DANGEROUS_KUBECTL_COMMANDS = [
     "patch", "edit", "rollout", "scale", "annotate", "label",
     "taint", "cordon", "drain", "uncordon"
 ]
+
+# FIXED: Bedrock model response parsers
+def parse_bedrock_response(response_body: dict, model_id: str) -> str:
+    """Parse Bedrock response based on model type"""
+    try:
+        if "gpt" in model_id.lower():
+            # OpenAI format (for openai.gpt-oss-20b-1:0)
+            choices = response_body.get("choices", [])
+            if choices and len(choices) > 0:
+                message = choices[0].get("message", {})
+                return message.get("content", "")
+            return ""
+        elif "claude" in model_id.lower():
+            # Anthropic Claude format
+            content = response_body.get("content", [])
+            if content and len(content) > 0:
+                return content[0].get("text", "")
+            return ""
+        elif "titan" in model_id.lower():
+            # Amazon Titan format
+            return response_body.get("outputText", "")
+        else:
+            # Generic fallback
+            return response_body.get("generated_text", response_body.get("text", ""))
+    except Exception as e:
+        logger.error(f"Error parsing Bedrock response: {e}")
+        return ""
+
+def parse_embedding_response(response_body: dict, model_id: str) -> List[float]:
+    """Parse embedding response based on model type"""
+    try:
+        if "titan" in model_id.lower():
+            # Amazon Titan Embeddings
+            return response_body.get('embedding', [])
+        elif "cohere" in model_id.lower():
+            # Cohere embeddings
+            embeddings = response_body.get('embeddings', [])
+            return embeddings[0] if embeddings else []
+        else:
+            # Generic format
+            embeddings = response_body.get('embeddings', [])
+            return embeddings[0] if embeddings else response_body.get('embedding', [])
+    except Exception as e:
+        logger.error(f"Error parsing embedding response: {e}")
+        return []
 
 # Resolution templates for different error types
 RESOLUTION_TEMPLATES = {

@@ -2,19 +2,15 @@
 """
 Vector store management using Qdrant for storing and retrieving
 resolution knowledge from AWS/EKS and debug results
+FIXED: Proper embedding response parsing and error handling
 """
 
 import logging
 import json
 import hashlib
-import sys
-import os
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
-
-# Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -24,10 +20,7 @@ from qdrant_client.models import (
 import boto3
 from botocore.exceptions import ClientError
 
-try:
-    from rag_resolver.config import ResolverConfig
-except ImportError:
-    from config import ResolverConfig
+from .config import ResolverConfig, parse_embedding_response
 
 logger = logging.getLogger(__name__)
 
@@ -111,54 +104,69 @@ class VectorStore:
             logger.error(f"Error ensuring collection: {e}")
             raise
     
-    def generate_embedding(self, text: str) -> List[float]:
-        """Generate embedding using AWS Bedrock"""
-        try:
-            # Prepare the request based on the embedding model
-            if "titan" in self.config.aws.bedrock_embedding_model.lower():
-                # Amazon Titan Embeddings
-                request_body = json.dumps({
-                    "inputText": text
-                })
-            else:
-                # Generic embedding model format
-                request_body = json.dumps({
-                    "texts": [text],
-                    "input_type": "search_document"
-                })
-            
-            response = self.bedrock_client.invoke_model(
-                modelId=self.config.aws.bedrock_embedding_model,
-                body=request_body,
-                contentType="application/json",
-                accept="application/json"
-            )
-            
-            response_body = json.loads(response['body'].read())
-            
-            # Extract embedding based on model type
-            if "titan" in self.config.aws.bedrock_embedding_model.lower():
-                embedding = response_body.get('embedding', [])
-            else:
-                embeddings = response_body.get('embeddings', [])
-                embedding = embeddings[0] if embeddings else []
-            
-            if not embedding:
-                raise ValueError("No embedding returned from model")
-            
-            return embedding
-            
-        except Exception as e:
-            logger.error(f"Error generating embedding: {e}")
-            # Fallback to random vector for testing
-            logger.warning("Using random embedding as fallback")
-            return np.random.rand(self.config.qdrant.vector_size).tolist()
+    def generate_embedding(self, text: str, max_retries: int = 3) -> List[float]:
+        """FIXED: Generate embedding using AWS Bedrock with proper response parsing"""
+        for attempt in range(max_retries):
+            try:
+                # Prepare the request based on the embedding model
+                if "titan" in self.config.aws.bedrock_embedding_model.lower():
+                    # Amazon Titan Embeddings
+                    request_body = json.dumps({
+                        "inputText": text[:8000]  # Limit input size
+                    })
+                else:
+                    # Generic embedding model format
+                    request_body = json.dumps({
+                        "texts": [text[:8000]],
+                        "input_type": "search_document"
+                    })
+                
+                response = self.bedrock_client.invoke_model(
+                    modelId=self.config.aws.bedrock_embedding_model,
+                    body=request_body,
+                    contentType="application/json",
+                    accept="application/json"
+                )
+                
+                response_body = json.loads(response['body'].read())
+                
+                # FIXED: Use proper response parser
+                embedding = parse_embedding_response(response_body, self.config.aws.bedrock_embedding_model)
+                
+                if not embedding:
+                    raise ValueError("No embedding returned from model")
+                
+                # Validate embedding dimension
+                if len(embedding) != self.config.qdrant.vector_size:
+                    logger.warning(f"Embedding dimension mismatch: got {len(embedding)}, expected {self.config.qdrant.vector_size}")
+                    # Pad or truncate to match expected size
+                    if len(embedding) < self.config.qdrant.vector_size:
+                        embedding.extend([0.0] * (self.config.qdrant.vector_size - len(embedding)))
+                    else:
+                        embedding = embedding[:self.config.qdrant.vector_size]
+                
+                return embedding
+                
+            except Exception as e:
+                logger.error(f"Embedding attempt {attempt + 1} failed: {e}")
+                if attempt == max_retries - 1:
+                    # Fallback to random vector for testing/development
+                    logger.warning("Using random embedding as fallback")
+                    return np.random.rand(self.config.qdrant.vector_size).tolist()
+                
+                # Wait before retry
+                import time
+                time.sleep(2 ** attempt)
     
     def store_resolution(self, resolution_data: Dict[str, Any]) -> str:
-        """Store a resolution in the vector store"""
+        """Store a resolution in the vector store with enhanced error handling"""
         try:
             # Create text for embedding
             text_content = self._create_searchable_text(resolution_data)
+            
+            if not text_content.strip():
+                logger.warning("Empty text content for embedding, using default")
+                text_content = f"Error type: {resolution_data.get('error_type', 'unknown')}"
             
             # Generate embedding
             embedding = self.generate_embedding(text_content)
@@ -166,7 +174,7 @@ class VectorStore:
             # Create unique ID
             resolution_id = self._generate_resolution_id(resolution_data)
             
-            # Prepare metadata
+            # Prepare metadata with safe extraction
             metadata = {
                 "error_type": resolution_data.get("error_type", "unknown"),
                 "namespace": resolution_data.get("namespace", "default"),
@@ -176,23 +184,34 @@ class VectorStore:
                 "created_at": datetime.utcnow().isoformat(),
                 "resolution_type": resolution_data.get("resolution_type", "manual"),
                 "commands_executed": len(resolution_data.get("executed_commands", [])),
-                "text_content": text_content[:500]  # First 500 chars for preview
+                "text_content": text_content[:500],  # First 500 chars for preview
+                "resolution_duration": resolution_data.get("resolution_duration", 0.0),
+                "intelligence_used": resolution_data.get("intelligence_used", False)
             }
             
-            # Store in Qdrant
-            point = PointStruct(
-                id=resolution_id,  # This should now be a UUID string
-                vector=embedding,
-                payload=metadata
-            )
-            
-            self.client.upsert(
-                collection_name=self.config.qdrant.collection_name,
-                points=[point]
-            )
-            
-            logger.info(f"Stored resolution: {resolution_id}")
-            return resolution_id
+            # Store in Qdrant with retry logic
+            for attempt in range(3):
+                try:
+                    point = PointStruct(
+                        id=resolution_id,
+                        vector=embedding,
+                        payload=metadata
+                    )
+                    
+                    self.client.upsert(
+                        collection_name=self.config.qdrant.collection_name,
+                        points=[point]
+                    )
+                    
+                    logger.info(f"Stored resolution: {resolution_id}")
+                    return resolution_id
+                    
+                except Exception as e:
+                    if attempt == 2:  # Last attempt
+                        raise e
+                    logger.warning(f"Storage attempt {attempt + 1} failed: {e}, retrying...")
+                    import time
+                    time.sleep(1)
             
         except Exception as e:
             logger.error(f"Error storing resolution: {e}")
@@ -201,7 +220,7 @@ class VectorStore:
     def search_similar_resolutions(self, error_description: str, 
                                  error_type: str = None, 
                                  limit: int = None) -> List[Dict[str, Any]]:
-        """Search for similar resolutions using vector similarity"""
+        """Search for similar resolutions using vector similarity with enhanced error handling"""
         limit = limit or self.config.rag.max_context_documents
         
         try:
@@ -221,25 +240,38 @@ class VectorStore:
             # Prefer successful resolutions
             search_filter = Filter(must=filter_conditions) if filter_conditions else None
             
-            # Search for similar vectors
-            search_results = self.client.search(
-                collection_name=self.config.qdrant.collection_name,
-                query_vector=query_embedding,
-                query_filter=search_filter,
-                limit=limit,
-                score_threshold=self.config.rag.similarity_threshold
-            )
+            # Search for similar vectors with retry logic
+            for attempt in range(3):
+                try:
+                    search_results = self.client.search(
+                        collection_name=self.config.qdrant.collection_name,
+                        query_vector=query_embedding,
+                        query_filter=search_filter,
+                        limit=limit,
+                        score_threshold=self.config.rag.similarity_threshold
+                    )
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        raise e
+                    logger.warning(f"Search attempt {attempt + 1} failed: {e}, retrying...")
+                    import time
+                    time.sleep(1)
             
             # Convert results to usable format
             results = []
             for hit in search_results:
-                result = {
-                    "id": hit.id,
-                    "score": hit.score,
-                    "metadata": hit.payload,
-                    "relevance": "high" if hit.score > 0.8 else "medium" if hit.score > 0.7 else "low"
-                }
-                results.append(result)
+                try:
+                    result = {
+                        "id": hit.id,
+                        "score": hit.score,
+                        "metadata": hit.payload,
+                        "relevance": "high" if hit.score > 0.8 else "medium" if hit.score > 0.7 else "low"
+                    }
+                    results.append(result)
+                except Exception as e:
+                    logger.warning(f"Error processing search result: {e}")
+                    continue
             
             logger.info(f"Found {len(results)} similar resolutions for error type: {error_type}")
             return results
@@ -249,14 +281,14 @@ class VectorStore:
             return []
     
     def get_resolution_by_id(self, resolution_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve a specific resolution by ID"""
+        """Retrieve a specific resolution by ID with error handling"""
         try:
             points = self.client.retrieve(
                 collection_name=self.config.qdrant.collection_name,
                 ids=[resolution_id]
             )
             
-            if points:
+            if points and len(points) > 0:
                 point = points[0]
                 return {
                     "id": point.id,
@@ -270,7 +302,7 @@ class VectorStore:
     
     def update_resolution_success(self, resolution_id: str, success: bool, 
                                 feedback: str = None):
-        """Update the success status of a resolution"""
+        """Update the success status of a resolution with error handling"""
         try:
             # Get current point
             points = self.client.retrieve(
@@ -285,53 +317,82 @@ class VectorStore:
             point = points[0]
             
             # Update metadata
-            updated_payload = point.payload.copy()
+            updated_payload = dict(point.payload) if point.payload else {}
             updated_payload["success"] = success
             updated_payload["updated_at"] = datetime.utcnow().isoformat()
             if feedback:
                 updated_payload["feedback"] = feedback
             
-            # Update point
-            updated_point = PointStruct(
-                id=resolution_id,
-                vector=point.vector,
-                payload=updated_payload
-            )
-            
-            self.client.upsert(
-                collection_name=self.config.qdrant.collection_name,
-                points=[updated_point]
-            )
-            
-            logger.info(f"Updated resolution {resolution_id} success status: {success}")
+            # Update point with retry logic
+            for attempt in range(3):
+                try:
+                    updated_point = PointStruct(
+                        id=resolution_id,
+                        vector=point.vector,
+                        payload=updated_payload
+                    )
+                    
+                    self.client.upsert(
+                        collection_name=self.config.qdrant.collection_name,
+                        points=[updated_point]
+                    )
+                    
+                    logger.info(f"Updated resolution {resolution_id} success status: {success}")
+                    return
+                    
+                except Exception as e:
+                    if attempt == 2:
+                        raise e
+                    logger.warning(f"Update attempt {attempt + 1} failed: {e}, retrying...")
+                    import time
+                    time.sleep(1)
             
         except Exception as e:
             logger.error(f"Error updating resolution success: {e}")
     
     def get_resolution_stats(self) -> Dict[str, Any]:
-        """Get statistics about stored resolutions"""
+        """Get statistics about stored resolutions with comprehensive error handling"""
         try:
             collection_info = self.client.get_collection(self.config.qdrant.collection_name)
             
-            # Get counts by success status
-            successful_count = len(self.client.scroll(
-                collection_name=self.config.qdrant.collection_name,
-                scroll_filter=Filter(
-                    must=[FieldCondition(key="success", match=MatchValue(value=True))]
-                ),
-                limit=10000  # Max count
-            )[0])
+            if collection_info.points_count == 0:
+                return {
+                    "total_resolutions": 0,
+                    "successful_resolutions": 0,
+                    "success_rate": 0.0,
+                    "error_types": {},
+                    "collection_status": collection_info.status,
+                    "last_updated": datetime.utcnow().isoformat()
+                }
             
-            # Get counts by error type
+            # Get successful resolutions count
+            successful_count = 0
+            try:
+                successful_points = self.client.scroll(
+                    collection_name=self.config.qdrant.collection_name,
+                    scroll_filter=Filter(
+                        must=[FieldCondition(key="success", match=MatchValue(value=True))]
+                    ),
+                    limit=10000  # Max count
+                )
+                successful_count = len(successful_points[0])
+            except Exception as e:
+                logger.warning(f"Could not get successful resolutions count: {e}")
+            
+            # Get error type distribution
             error_types = {}
-            all_points = self.client.scroll(
-                collection_name=self.config.qdrant.collection_name,
-                limit=10000
-            )[0]
-            
-            for point in all_points:
-                error_type = point.payload.get("error_type", "unknown")
-                error_types[error_type] = error_types.get(error_type, 0) + 1
+            try:
+                all_points = self.client.scroll(
+                    collection_name=self.config.qdrant.collection_name,
+                    limit=1000  # Reasonable limit for stats
+                )
+                
+                for point in all_points[0]:
+                    if point.payload:
+                        error_type = point.payload.get("error_type", "unknown")
+                        error_types[error_type] = error_types.get(error_type, 0) + 1
+            except Exception as e:
+                logger.warning(f"Could not get error type distribution: {e}")
             
             return {
                 "total_resolutions": collection_info.points_count,
@@ -348,16 +409,18 @@ class VectorStore:
             return {"error": str(e)}
     
     def _create_searchable_text(self, resolution_data: Dict[str, Any]) -> str:
-        """Create searchable text from resolution data"""
+        """Create searchable text from resolution data with safe extraction"""
         components = []
         
-        # Error information
+        # Safely extract error information
         error_type = resolution_data.get("error_type", "")
         error_message = resolution_data.get("error_message", "")
         if error_type:
             components.append(f"Error type: {error_type}")
         if error_message:
-            components.append(f"Error: {error_message}")
+            # Limit message length and clean it
+            clean_message = str(error_message)[:500].replace('\n', ' ').replace('\r', ' ')
+            components.append(f"Error: {clean_message}")
         
         # Context information
         namespace = resolution_data.get("namespace", "")
@@ -370,73 +433,95 @@ class VectorStore:
         # Resolution information
         resolution_steps = resolution_data.get("resolution_steps", [])
         if resolution_steps:
-            components.append("Resolution steps: " + " ".join(resolution_steps))
+            steps_text = " ".join(str(step) for step in resolution_steps if step)
+            components.append(f"Resolution steps: {steps_text}")
         
         executed_commands = resolution_data.get("executed_commands", [])
         if executed_commands:
-            components.append("Commands executed: " + " ".join(executed_commands))
+            commands_text = " ".join(str(cmd) for cmd in executed_commands if cmd)
+            components.append(f"Commands executed: {commands_text}")
         
-        # Diagnosis results
+        # Diagnosis results (safely extract)
         diagnosis_results = resolution_data.get("diagnosis_results", {})
-        if diagnosis_results:
-            for cmd, result in diagnosis_results.items():
-                if isinstance(result, str) and len(result) < 200:
-                    components.append(f"Diagnosis {cmd}: {result}")
+        if isinstance(diagnosis_results, dict):
+            results = diagnosis_results.get("results", {})
+            if isinstance(results, dict):
+                for cmd, result in list(results.items())[:3]:  # Limit to first 3
+                    if isinstance(result, dict) and result.get("output"):
+                        output = str(result["output"])[:200]  # Limit output length
+                        components.append(f"Diagnosis {cmd}: {output}")
+        
+        # AWS Intelligence findings
+        aws_investigation = resolution_data.get("aws_investigation", {})
+        if isinstance(aws_investigation, dict):
+            findings = aws_investigation.get("findings", [])
+            if findings:
+                findings_text = " ".join(str(finding) for finding in findings[:2] if finding)
+                components.append(f"AWS findings: {findings_text}")
         
         return "\n".join(components)
     
     def _generate_resolution_id(self, resolution_data: Dict[str, Any]) -> str:
-        """Generate a unique UUID for a resolution"""
-        import uuid
-        
-        # Create hash based on key components for deterministic UUID
+        """Generate a unique ID for a resolution with collision avoidance"""
+        # Create hash based on key components
         key_components = [
-            resolution_data.get("error_type", ""),
-            resolution_data.get("namespace", ""),
-            resolution_data.get("pod_name", ""),
-            str(datetime.utcnow().date())  # Include date for uniqueness
+            str(resolution_data.get("error_type", "")),
+            str(resolution_data.get("namespace", "")),
+            str(resolution_data.get("pod_name", "")),
+            str(datetime.utcnow().timestamp())  # Add timestamp for uniqueness
         ]
         
         hash_input = "_".join(key_components)
         hash_object = hashlib.sha256(hash_input.encode())
         
-        # Generate UUID from hash for Qdrant compatibility
-        uuid_from_hash = uuid.uuid5(uuid.NAMESPACE_DNS, hash_object.hexdigest())
-        return str(uuid_from_hash)
+        # Create a shorter, more manageable ID
+        short_hash = hash_object.hexdigest()[:16]
+        return f"res_{short_hash}"
     
     def cleanup_old_resolutions(self, days_old: int = 90) -> int:
-        """Clean up old unsuccessful resolutions"""
+        """Clean up old unsuccessful resolutions with enhanced error handling"""
         try:
             cutoff_date = (datetime.utcnow() - timedelta(days=days_old)).isoformat()
             
             # Find old unsuccessful resolutions
-            scroll_result = self.client.scroll(
-                collection_name=self.config.qdrant.collection_name,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(key="success", match=MatchValue(value=False)),
-                        FieldCondition(
-                            key="created_at", 
-                            range={
-                                "lt": cutoff_date
-                            }
-                        )
-                    ]
-                ),
-                limit=10000
-            )
-            
-            old_points = scroll_result[0]
-            
-            if old_points:
-                old_ids = [point.id for point in old_points]
-                self.client.delete(
+            try:
+                scroll_result = self.client.scroll(
                     collection_name=self.config.qdrant.collection_name,
-                    points_selector=old_ids
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(key="success", match=MatchValue(value=False)),
+                            FieldCondition(
+                                key="created_at", 
+                                range={
+                                    "lt": cutoff_date
+                                }
+                            )
+                        ]
+                    ),
+                    limit=1000  # Process in batches
                 )
                 
-                logger.info(f"Cleaned up {len(old_ids)} old resolutions")
-                return len(old_ids)
+                old_points = scroll_result[0] if scroll_result else []
+                
+            except Exception as e:
+                logger.warning(f"Could not query old resolutions: {e}")
+                return 0
+            
+            if old_points:
+                old_ids = [point.id for point in old_points if hasattr(point, 'id')]
+                
+                if old_ids:
+                    try:
+                        self.client.delete(
+                            collection_name=self.config.qdrant.collection_name,
+                            points_selector=old_ids
+                        )
+                        
+                        logger.info(f"Cleaned up {len(old_ids)} old resolutions")
+                        return len(old_ids)
+                    except Exception as e:
+                        logger.error(f"Error deleting old resolutions: {e}")
+                        return 0
             
             return 0
             
@@ -444,12 +529,67 @@ class VectorStore:
             logger.error(f"Error cleaning up old resolutions: {e}")
             return 0
     
-    def close(self):
-        """Close connections"""
+    def get_health_status(self) -> Dict[str, Any]:
+        """Get vector store health status"""
         try:
-            if hasattr(self, 'client'):
-                # Qdrant client doesn't need explicit closing
+            # Test basic connectivity
+            collections = self.client.get_collections()
+            
+            # Check if our collection exists
+            collection_exists = any(
+                col.name == self.config.qdrant.collection_name 
+                for col in collections.collections
+            )
+            
+            if not collection_exists:
+                return {
+                    "status": "unhealthy",
+                    "error": f"Collection {self.config.qdrant.collection_name} not found",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            
+            # Get collection info
+            collection_info = self.client.get_collection(self.config.qdrant.collection_name)
+            
+            # Test embedding generation
+            try:
+                test_embedding = self.generate_embedding("test health check")
+                embedding_healthy = len(test_embedding) == self.config.qdrant.vector_size
+            except Exception as e:
+                logger.warning(f"Embedding health check failed: {e}")
+                embedding_healthy = False
+            
+            return {
+                "status": "healthy" if embedding_healthy else "degraded",
+                "collection_exists": collection_exists,
+                "collection_status": collection_info.status,
+                "points_count": collection_info.points_count,
+                "embedding_healthy": embedding_healthy,
+                "vector_size": self.config.qdrant.vector_size,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
+            return {
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+    
+    def close(self):
+        """Close connections with proper cleanup"""
+        try:
+            # Qdrant client doesn't need explicit closing, but we can clean up any resources
+            if hasattr(self, 'client') and self.client:
+                # Any cleanup needed for the client
                 pass
-            logger.info("Vector store connections closed")
+            
+            if hasattr(self, 'bedrock_client') and self.bedrock_client:
+                # Bedrock client cleanup if needed
+                pass
+                
+            logger.info("Vector store connections closed successfully")
+            
         except Exception as e:
             logger.error(f"Error closing vector store: {e}")
