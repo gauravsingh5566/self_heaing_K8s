@@ -36,7 +36,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY rag_resolver/ /app/rag_resolver/
 COPY __init__.py /app/
-COPY setup.py /app/
+# COPY setup.py /app/
 
 # Create logs directory
 RUN mkdir -p /app/logs
