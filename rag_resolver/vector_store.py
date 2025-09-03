@@ -2,12 +2,13 @@
 """
 Vector store management using Qdrant for storing and retrieving
 resolution knowledge from AWS/EKS and debug results
-FIXED: Proper embedding response parsing and error handling
+FIXED: Proper Qdrant point ID format using UUID
 """
 
 import logging
 import json
 import hashlib
+import uuid
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
@@ -105,7 +106,7 @@ class VectorStore:
             raise
     
     def generate_embedding(self, text: str, max_retries: int = 3) -> List[float]:
-        """FIXED: Generate embedding using AWS Bedrock with proper response parsing"""
+        """Generate embedding using AWS Bedrock with proper response parsing"""
         for attempt in range(max_retries):
             try:
                 # Prepare the request based on the embedding model
@@ -130,7 +131,7 @@ class VectorStore:
                 
                 response_body = json.loads(response['body'].read())
                 
-                # FIXED: Use proper response parser
+                # Use proper response parser
                 embedding = parse_embedding_response(response_body, self.config.aws.bedrock_embedding_model)
                 
                 if not embedding:
@@ -159,7 +160,7 @@ class VectorStore:
                 time.sleep(2 ** attempt)
     
     def store_resolution(self, resolution_data: Dict[str, Any]) -> str:
-        """Store a resolution in the vector store with enhanced error handling"""
+        """Store a resolution in the vector store with UUID format"""
         try:
             # Create text for embedding
             text_content = self._create_searchable_text(resolution_data)
@@ -171,11 +172,15 @@ class VectorStore:
             # Generate embedding
             embedding = self.generate_embedding(text_content)
             
-            # Create unique ID
-            resolution_id = self._generate_resolution_id(resolution_data)
+            # FIXED: Generate valid UUID for Qdrant
+            resolution_uuid = str(uuid.uuid4())
+            
+            # Create a readable resolution ID for reference
+            readable_id = self._generate_readable_id(resolution_data)
             
             # Prepare metadata with safe extraction
             metadata = {
+                "resolution_id": readable_id,  # Store readable ID in metadata
                 "error_type": resolution_data.get("error_type", "unknown"),
                 "namespace": resolution_data.get("namespace", "default"),
                 "severity": resolution_data.get("error_severity", "MEDIUM"),
@@ -192,8 +197,9 @@ class VectorStore:
             # Store in Qdrant with retry logic
             for attempt in range(3):
                 try:
+                    # Use UUID as point ID
                     point = PointStruct(
-                        id=resolution_id,
+                        id=resolution_uuid,  # Use UUID instead of string
                         vector=embedding,
                         payload=metadata
                     )
@@ -203,8 +209,8 @@ class VectorStore:
                         points=[point]
                     )
                     
-                    logger.info(f"Stored resolution: {resolution_id}")
-                    return resolution_id
+                    logger.info(f"Stored resolution: {readable_id} (UUID: {resolution_uuid})")
+                    return readable_id  # Return readable ID for external reference
                     
                 except Exception as e:
                     if attempt == 2:  # Last attempt
@@ -220,7 +226,7 @@ class VectorStore:
     def search_similar_resolutions(self, error_description: str, 
                                  error_type: str = None, 
                                  limit: int = None) -> List[Dict[str, Any]]:
-        """Search for similar resolutions using vector similarity with enhanced error handling"""
+        """Search for similar resolutions using vector similarity"""
         limit = limit or self.config.rag.max_context_documents
         
         try:
@@ -263,7 +269,8 @@ class VectorStore:
             for hit in search_results:
                 try:
                     result = {
-                        "id": hit.id,
+                        "id": hit.payload.get("resolution_id", str(hit.id)),  # Use readable ID from metadata
+                        "uuid": str(hit.id),  # Store UUID for internal use
                         "score": hit.score,
                         "metadata": hit.payload,
                         "relevance": "high" if hit.score > 0.8 else "medium" if hit.score > 0.7 else "low"
@@ -281,19 +288,43 @@ class VectorStore:
             return []
     
     def get_resolution_by_id(self, resolution_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve a specific resolution by ID with error handling"""
+        """Retrieve a specific resolution by readable ID or UUID"""
         try:
-            points = self.client.retrieve(
+            # Try to find by readable ID first (stored in metadata)
+            search_results = self.client.scroll(
                 collection_name=self.config.qdrant.collection_name,
-                ids=[resolution_id]
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="resolution_id", match=MatchValue(value=resolution_id))]
+                ),
+                limit=1
             )
             
-            if points and len(points) > 0:
-                point = points[0]
+            if search_results[0]:  # Found by readable ID
+                point = search_results[0][0]
                 return {
-                    "id": point.id,
+                    "id": point.payload.get("resolution_id", str(point.id)),
+                    "uuid": str(point.id),
                     "metadata": point.payload
                 }
+            
+            # Try as UUID if not found by readable ID
+            try:
+                uuid_obj = uuid.UUID(resolution_id)  # Validate UUID format
+                points = self.client.retrieve(
+                    collection_name=self.config.qdrant.collection_name,
+                    ids=[str(uuid_obj)]
+                )
+                
+                if points and len(points) > 0:
+                    point = points[0]
+                    return {
+                        "id": point.payload.get("resolution_id", str(point.id)),
+                        "uuid": str(point.id),
+                        "metadata": point.payload
+                    }
+            except ValueError:
+                pass  # Not a valid UUID
+            
             return None
             
         except Exception as e:
@@ -302,16 +333,24 @@ class VectorStore:
     
     def update_resolution_success(self, resolution_id: str, success: bool, 
                                 feedback: str = None):
-        """Update the success status of a resolution with error handling"""
+        """Update the success status of a resolution"""
         try:
+            # Find the resolution first
+            resolution = self.get_resolution_by_id(resolution_id)
+            if not resolution:
+                logger.warning(f"Resolution {resolution_id} not found for update")
+                return
+            
+            point_uuid = resolution["uuid"]
+            
             # Get current point
             points = self.client.retrieve(
                 collection_name=self.config.qdrant.collection_name,
-                ids=[resolution_id]
+                ids=[point_uuid]
             )
             
             if not points:
-                logger.warning(f"Resolution {resolution_id} not found for update")
+                logger.warning(f"Resolution UUID {point_uuid} not found for update")
                 return
             
             point = points[0]
@@ -327,7 +366,7 @@ class VectorStore:
             for attempt in range(3):
                 try:
                     updated_point = PointStruct(
-                        id=resolution_id,
+                        id=point_uuid,  # Use UUID
                         vector=point.vector,
                         payload=updated_payload
                     )
@@ -351,7 +390,7 @@ class VectorStore:
             logger.error(f"Error updating resolution success: {e}")
     
     def get_resolution_stats(self) -> Dict[str, Any]:
-        """Get statistics about stored resolutions with comprehensive error handling"""
+        """Get statistics about stored resolutions"""
         try:
             collection_info = self.client.get_collection(self.config.qdrant.collection_name)
             
@@ -409,7 +448,7 @@ class VectorStore:
             return {"error": str(e)}
     
     def _create_searchable_text(self, resolution_data: Dict[str, Any]) -> str:
-        """Create searchable text from resolution data with safe extraction"""
+        """Create searchable text from resolution data"""
         components = []
         
         # Safely extract error information
@@ -418,7 +457,6 @@ class VectorStore:
         if error_type:
             components.append(f"Error type: {error_type}")
         if error_message:
-            # Limit message length and clean it
             clean_message = str(error_message)[:500].replace('\n', ' ').replace('\r', ' ')
             components.append(f"Error: {clean_message}")
         
@@ -430,60 +468,27 @@ class VectorStore:
         if pod_name:
             components.append(f"Pod: {pod_name}")
         
-        # Resolution information
-        resolution_steps = resolution_data.get("resolution_steps", [])
-        if resolution_steps:
-            steps_text = " ".join(str(step) for step in resolution_steps if step)
-            components.append(f"Resolution steps: {steps_text}")
-        
-        executed_commands = resolution_data.get("executed_commands", [])
-        if executed_commands:
-            commands_text = " ".join(str(cmd) for cmd in executed_commands if cmd)
-            components.append(f"Commands executed: {commands_text}")
-        
-        # Diagnosis results (safely extract)
-        diagnosis_results = resolution_data.get("diagnosis_results", {})
-        if isinstance(diagnosis_results, dict):
-            results = diagnosis_results.get("results", {})
-            if isinstance(results, dict):
-                for cmd, result in list(results.items())[:3]:  # Limit to first 3
-                    if isinstance(result, dict) and result.get("output"):
-                        output = str(result["output"])[:200]  # Limit output length
-                        components.append(f"Diagnosis {cmd}: {output}")
-        
-        # AWS Intelligence findings
-        aws_investigation = resolution_data.get("aws_investigation", {})
-        if isinstance(aws_investigation, dict):
-            findings = aws_investigation.get("findings", [])
-            if findings:
-                findings_text = " ".join(str(finding) for finding in findings[:2] if finding)
-                components.append(f"AWS findings: {findings_text}")
-        
         return "\n".join(components)
     
-    def _generate_resolution_id(self, resolution_data: Dict[str, Any]) -> str:
-        """Generate a unique ID for a resolution with collision avoidance"""
-        # Create hash based on key components
+    def _generate_readable_id(self, resolution_data: Dict[str, Any]) -> str:
+        """Generate a readable ID for external reference"""
         key_components = [
             str(resolution_data.get("error_type", "")),
             str(resolution_data.get("namespace", "")),
             str(resolution_data.get("pod_name", "")),
-            str(datetime.utcnow().timestamp())  # Add timestamp for uniqueness
+            str(datetime.utcnow().timestamp())
         ]
         
         hash_input = "_".join(key_components)
         hash_object = hashlib.sha256(hash_input.encode())
-        
-        # Create a shorter, more manageable ID
         short_hash = hash_object.hexdigest()[:16]
         return f"res_{short_hash}"
     
     def cleanup_old_resolutions(self, days_old: int = 90) -> int:
-        """Clean up old unsuccessful resolutions with enhanced error handling"""
+        """Clean up old unsuccessful resolutions"""
         try:
             cutoff_date = (datetime.utcnow() - timedelta(days=days_old)).isoformat()
             
-            # Find old unsuccessful resolutions
             try:
                 scroll_result = self.client.scroll(
                     collection_name=self.config.qdrant.collection_name,
@@ -498,7 +503,7 @@ class VectorStore:
                             )
                         ]
                     ),
-                    limit=1000  # Process in batches
+                    limit=1000
                 )
                 
                 old_points = scroll_result[0] if scroll_result else []
@@ -508,17 +513,17 @@ class VectorStore:
                 return 0
             
             if old_points:
-                old_ids = [point.id for point in old_points if hasattr(point, 'id')]
+                old_uuids = [str(point.id) for point in old_points if hasattr(point, 'id')]
                 
-                if old_ids:
+                if old_uuids:
                     try:
                         self.client.delete(
                             collection_name=self.config.qdrant.collection_name,
-                            points_selector=old_ids
+                            points_selector=old_uuids
                         )
                         
-                        logger.info(f"Cleaned up {len(old_ids)} old resolutions")
-                        return len(old_ids)
+                        logger.info(f"Cleaned up {len(old_uuids)} old resolutions")
+                        return len(old_uuids)
                     except Exception as e:
                         logger.error(f"Error deleting old resolutions: {e}")
                         return 0
@@ -532,10 +537,8 @@ class VectorStore:
     def get_health_status(self) -> Dict[str, Any]:
         """Get vector store health status"""
         try:
-            # Test basic connectivity
             collections = self.client.get_collections()
             
-            # Check if our collection exists
             collection_exists = any(
                 col.name == self.config.qdrant.collection_name 
                 for col in collections.collections
@@ -548,10 +551,8 @@ class VectorStore:
                     "timestamp": datetime.utcnow().isoformat()
                 }
             
-            # Get collection info
             collection_info = self.client.get_collection(self.config.qdrant.collection_name)
             
-            # Test embedding generation
             try:
                 test_embedding = self.generate_embedding("test health check")
                 embedding_healthy = len(test_embedding) == self.config.qdrant.vector_size
@@ -578,18 +579,12 @@ class VectorStore:
             }
     
     def close(self):
-        """Close connections with proper cleanup"""
+        """Close connections"""
         try:
-            # Qdrant client doesn't need explicit closing, but we can clean up any resources
             if hasattr(self, 'client') and self.client:
-                # Any cleanup needed for the client
                 pass
-            
             if hasattr(self, 'bedrock_client') and self.bedrock_client:
-                # Bedrock client cleanup if needed
                 pass
-                
             logger.info("Vector store connections closed successfully")
-            
         except Exception as e:
             logger.error(f"Error closing vector store: {e}")

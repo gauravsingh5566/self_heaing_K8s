@@ -2,6 +2,7 @@
 """
 MCP (Model Context Protocol) executor for running kubectl commands
 in EKS cluster with safety controls and validation
+FIXED: Command template formatting with proper error handling
 """
 
 import asyncio
@@ -427,12 +428,70 @@ class MCPExecutor:
         return safe_commands
     
     def format_command_template(self, command_template: str, variables: Dict[str, str]) -> str:
-        """Format command template with provided variables"""
+        """FIXED: Format command template with provided variables and proper error handling"""
         try:
-            return command_template.format(**variables)
-        except KeyError as e:
-            logger.warning(f"Missing variable in command template: {e}")
-            return command_template
+            # Handle both {variable} and {0}, {1} style formatting
+            
+            # First, try named formatting with variables dict
+            try:
+                return command_template.format(**variables)
+            except KeyError as e:
+                logger.warning(f"Missing variable in command template: {e}")
+                # Continue to positional formatting attempt
+            
+            # If named formatting fails, try positional formatting
+            # Extract values in order of common kubernetes variables
+            common_vars = ["pod_name", "namespace", "deployment_name", "container_name", "node_name"]
+            var_values = []
+            
+            for var in common_vars:
+                if var in variables:
+                    var_values.append(variables[var])
+            
+            # Try positional formatting if we have values
+            if var_values:
+                try:
+                    return command_template.format(*var_values)
+                except (IndexError, ValueError) as e:
+                    logger.warning(f"Positional formatting failed: {e}")
+            
+            # If all formatting fails, do manual replacement for common patterns
+            formatted_command = command_template
+            
+            # Replace common kubernetes placeholders
+            replacements = {
+                "{pod_name}": variables.get("pod_name", "UNKNOWN_POD"),
+                "{namespace}": variables.get("namespace", "default"),
+                "{deployment_name}": variables.get("deployment_name", "UNKNOWN_DEPLOYMENT"),
+                "{container_name}": variables.get("container_name", "main"),
+                "{node_name}": variables.get("node_name", "UNKNOWN_NODE")
+            }
+            
+            for placeholder, value in replacements.items():
+                formatted_command = formatted_command.replace(placeholder, value)
+            
+            # Handle numbered placeholders like {0}, {1}, etc.
+            for i, value in enumerate(var_values):
+                placeholder = "{" + str(i) + "}"
+                formatted_command = formatted_command.replace(placeholder, value)
+            
+            return formatted_command
+            
         except Exception as e:
             logger.error(f"Error formatting command template: {e}")
-            return command_template
+            logger.error(f"Template: {command_template}")
+            logger.error(f"Variables: {variables}")
+            
+            # Return a safe fallback command
+            pod_name = variables.get("pod_name", "UNKNOWN_POD")
+            namespace = variables.get("namespace", "default")
+            
+            if "describe" in command_template.lower():
+                return f"kubectl describe pod {pod_name} -n {namespace}"
+            elif "get" in command_template.lower() and "pod" in command_template.lower():
+                return f"kubectl get pod {pod_name} -n {namespace}"
+            elif "logs" in command_template.lower():
+                return f"kubectl logs {pod_name} -n {namespace}"
+            else:
+                # Generic fallback
+                return f"kubectl get pod {pod_name} -n {namespace}"
