@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Enhanced AWS Command Executor that can execute both AWS CLI and kubectl commands
+AWS Command Executor that can execute both AWS CLI and kubectl commands
 to perform intelligent resolution of Kubernetes errors
 """
 
@@ -30,8 +30,8 @@ class CommandResult:
     safe: bool
     command_type: str  # 'kubectl', 'aws', 'docker'
 
-class EnhancedAWSExecutor:
-    """Enhanced executor that can run AWS CLI, kubectl, and Docker commands intelligently"""
+class AWSExecutor:
+    """Executor that can run AWS CLI, kubectl, and Docker commands intelligently"""
     
     def __init__(self, config: ResolverConfig):
         self.config = config
@@ -196,7 +196,8 @@ class EnhancedAWSExecutor:
                                 "success": new_pod_status['healthy'],
                                 "steps": resolution_steps,
                                 "resolution_summary": f"Updated image from {current_image} to {new_image}",
-                                "new_image": new_image
+                                "new_image": new_image,
+                                "changes_made": [f"Updated deployment {deployment_name} to use {new_image}"]
                             }
                         else:
                             resolution_steps.append({
@@ -281,8 +282,7 @@ class EnhancedAWSExecutor:
                     if image_tags:
                         tags.extend(image_tags)
                         
-                # Sort tags by push date (most recent first)
-                # For simplicity, sort alphabetically for now
+                # Sort tags by name (most recent first) - you can customize this sorting logic
                 tags.sort(reverse=True)
                 return tags
             
@@ -517,7 +517,7 @@ class EnhancedAWSExecutor:
                 safe=True,
                 command_type=cmd_type
             )
-    
+
     async def intelligent_resource_limit_resolution(self, error_data: Dict[str, Any]) -> Dict[str, Any]:
         """Intelligently resolve resource limit errors"""
         pod_name = error_data.get('pod_name', '')
@@ -558,7 +558,22 @@ class EnhancedAWSExecutor:
                 }
                 
                 # Apply new resource limits
-                patch_cmd = f"""kubectl patch deployment {deployment_name} -n {namespace} -p '{{"spec":{{"template":{{"spec":{{"containers":[{{"name":"{deployment_name}","resources":{json.dumps(new_limits)}}}]}}}}}}}}'"""
+                patch_json = {
+                    "spec": {
+                        "template": {
+                            "spec": {
+                                "containers": [
+                                    {
+                                        "name": deployment_name,
+                                        "resources": new_limits
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+                
+                patch_cmd = f"kubectl patch deployment {deployment_name} -n {namespace} -p '{json.dumps(patch_json)}'"
                 patch_result = await self._execute_command(patch_cmd)
                 
                 resolution_steps.append({
@@ -583,7 +598,8 @@ class EnhancedAWSExecutor:
                     return {
                         "success": rollout_result.success,
                         "steps": resolution_steps,
-                        "resolution_summary": f"Increased resource limits for {deployment_name}"
+                        "resolution_summary": f"Increased resource limits for {deployment_name}",
+                        "changes_made": [f"Updated {deployment_name} resource limits to 1Gi memory, 500m CPU"]
                     }
             
         except Exception as e:
@@ -639,7 +655,8 @@ class EnhancedAWSExecutor:
             return {
                 "success": delete_result.success,
                 "steps": resolution_steps,
-                "resolution_summary": "Restarted pod to reset network connectivity"
+                "resolution_summary": "Restarted pod to reset network connectivity",
+                "changes_made": [f"Restarted pod {pod_name} to reset networking"]
             }
             
         except Exception as e:

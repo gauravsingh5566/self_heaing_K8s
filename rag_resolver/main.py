@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Main entry point for the RAG Resolver microservice with Enhanced Intelligence
+Main entry point for the RAG Resolver microservice with Smart Intelligence
 Handles CLI commands and service startup with actual AWS/K8s command execution
 """
 
@@ -15,7 +15,7 @@ from typing import Dict, Any
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Import enhanced components
+# Import smart components
 try:
     from rag_resolver.config import load_resolver_config
     from rag_resolver.service import main as start_service
@@ -33,10 +33,10 @@ def setup_logging(level: str = "INFO"):
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-async def test_enhanced_components():
-    """Test enhanced system components"""
+async def test_smart_components():
+    """Test smart system components"""
     config = load_resolver_config()
-    print("🧪 Testing Enhanced RAG Resolver Components...")
+    print("🧪 Testing Smart RAG Resolver Components...")
     print("=" * 50)
     
     try:
@@ -47,15 +47,15 @@ async def test_enhanced_components():
         print(f"   - EKS Cluster: {config.aws.cluster_name}")
         print(f"   - MongoDB: {config.mongodb.database_name}")
         
-        # Test 2: Initialize Enhanced RAG Engine
-        print("\n🔧 Initializing Enhanced RAG Engine...")
-        rag_engine = EnhancedRAGEngine(config)
-        print("✅ Enhanced RAG Engine initialized successfully")
+        # Test 2: Initialize Smart RAG Engine
+        print("\n🔧 Initializing Smart RAG Engine...")
+        rag_engine = SmartRAGEngine(config)
+        print("✅ Smart RAG Engine initialized successfully")
         
         # Test 3: AWS Command Execution
         print("\n⚙️  Testing AWS Command Execution...")
         test_aws_cmd = f"aws sts get-caller-identity --profile {config.aws.profile}"
-        aws_result = await rag_engine.enhanced_executor._execute_command(test_aws_cmd)
+        aws_result = await rag_engine.aws_executor._execute_command(test_aws_cmd)
         
         if aws_result.success:
             print("✅ AWS CLI execution successful")
@@ -66,7 +66,7 @@ async def test_enhanced_components():
         # Test 4: Kubectl Command Execution
         print("\n🎯 Testing Kubectl Command Execution...")
         test_k8s_cmd = "kubectl get nodes"
-        k8s_result = await rag_engine.enhanced_executor._execute_command(test_k8s_cmd)
+        k8s_result = await rag_engine.aws_executor._execute_command(test_k8s_cmd)
         
         if k8s_result.success:
             print("✅ Kubectl execution successful")
@@ -84,7 +84,7 @@ async def test_enhanced_components():
         ]
         
         for image in test_images:
-            parsed = rag_engine.enhanced_executor._parse_image_url(image)
+            parsed = rag_engine.aws_executor._parse_image_url(image)
             if parsed:
                 print(f"✅ Parsed {image}")
                 print(f"   - Registry: {parsed['registry']}")
@@ -95,22 +95,22 @@ async def test_enhanced_components():
         
         # Cleanup
         rag_engine.close()
-        print("\n✅ All enhanced component tests completed successfully!")
+        print("\n✅ All smart component tests completed successfully!")
         return True
         
     except Exception as e:
-        print(f"\n❌ Enhanced component test failed: {e}")
+        print(f"\n❌ Smart component test failed: {e}")
         return False
 
-async def resolve_error_intelligently(error_log_id: str, auto_execute: bool = True):
-    """CLI command to intelligently resolve a specific error"""
+async def resolve_error_smartly(error_log_id: str, auto_execute: bool = True):
+    """CLI command to smartly resolve a specific error"""
     config = load_resolver_config()
-    print(f"🚀 INTELLIGENTLY Resolving error: {error_log_id}")
+    print(f"🚀 SMARTLY Resolving error: {error_log_id}")
     print("=" * 50)
     
     try:
-        # Initialize Enhanced RAG Engine
-        rag_engine = EnhancedRAGEngine(config)
+        # Initialize Smart RAG Engine
+        rag_engine = SmartRAGEngine(config)
         
         # Fetch error from MongoDB
         from pymongo import MongoClient
@@ -132,14 +132,14 @@ async def resolve_error_intelligently(error_log_id: str, auto_execute: bool = Tr
         # Convert ObjectId to string
         error_doc["_id"] = str(error_doc["_id"])
         
-        # Start INTELLIGENT resolution
-        print(f"\n🧠 Starting INTELLIGENT resolution (auto_execute: {auto_execute})...")
+        # Start SMART resolution
+        print(f"\n🧠 Starting SMART resolution (auto_execute: {auto_execute})...")
         print("   This will actually execute AWS and kubectl commands to fix the issue!")
         
-        result = await rag_engine.resolve_error_intelligently(error_doc, auto_execute)
+        result = await rag_engine.resolve_error_smartly(error_doc, auto_execute)
         
-        # Display enhanced results
-        print(f"\n📊 Enhanced Resolution Results:")
+        # Display smart results
+        print(f"\n📊 Smart Resolution Results:")
         print(f"   - Success: {'✅' if result.get('success', False) else '❌'} {result.get('success', False)}")
         print(f"   - Resolution ID: {result.get('resolution_id', 'N/A')}")
         print(f"   - Resolution Type: {result.get('resolution_type', 'unknown')}")
@@ -190,18 +190,18 @@ async def resolve_error_intelligently(error_log_id: str, auto_execute: bool = Tr
         return result.get('success', False)
         
     except Exception as e:
-        print(f"❌ Intelligent resolution failed: {e}")
+        print(f"❌ Smart resolution failed: {e}")
         return False
 
-async def generate_resolution_report_cli(error_log_id: str):
-    """CLI command to generate a comprehensive resolution report"""
+async def generate_smart_report_cli(error_log_id: str):
+    """CLI command to generate a comprehensive smart report"""
     config = load_resolver_config()
-    print(f"📄 Generating comprehensive resolution report for: {error_log_id}")
+    print(f"📄 Generating smart resolution report for: {error_log_id}")
     print("=" * 50)
     
     try:
-        # Initialize Enhanced RAG Engine
-        rag_engine = EnhancedRAGEngine(config)
+        # Initialize Smart RAG Engine
+        rag_engine = SmartRAGEngine(config)
         
         # Fetch error from MongoDB
         from pymongo import MongoClient
@@ -218,13 +218,13 @@ async def generate_resolution_report_cli(error_log_id: str):
         error_doc["_id"] = str(error_doc["_id"])
         
         # Generate comprehensive report with AWS intelligence
-        print("🔍 Analyzing error and generating comprehensive report with AWS intelligence...")
+        print("🔍 Analyzing error and generating smart report with AWS intelligence...")
         
         # First get AWS investigation
         aws_investigation = await rag_engine._perform_aws_investigation(error_doc)
         
         # Generate detailed report
-        report_content = f"""# Comprehensive Kubernetes Error Resolution Report
+        report_content = f"""# Smart Kubernetes Error Resolution Report
 
 **Generated:** {datetime.now().isoformat()}
 **Error Type:** {error_doc.get('error_type', 'unknown')}
@@ -249,16 +249,16 @@ AWS Intelligence confidence level: {aws_investigation.get('resolution_confidence
             report_content += f"- {rec}\n"
         
         report_content += f"""
-## Intelligent Resolution Available
+## Smart Resolution Available
 
-The Enhanced RAG Resolver can automatically resolve this issue by:
+The Smart RAG Resolver can automatically resolve this issue by:
 
 1. **Performing AWS Intelligence Investigation**
    - Analyzing ECR repositories and image availability
    - Checking IAM permissions and policies
    - Validating network and security configurations
 
-2. **Executing Intelligent Commands**
+2. **Executing Smart Commands**
    - Finding correct image tags from ECR
    - Updating Kubernetes deployments automatically
    - Restarting pods and validating resolution
@@ -268,7 +268,7 @@ The Enhanced RAG Resolver can automatically resolve this issue by:
    - Monitoring pod startup and readiness
    - Storing resolution knowledge for future use
 
-## To Execute Intelligent Resolution
+## To Execute Smart Resolution
 
 Run the following command to have the system automatically fix this issue:
 
@@ -307,16 +307,16 @@ AWS Intelligence Confidence: **{aws_investigation.get('resolution_confidence', 0
 3. **For Low Confidence**: Use this report for manual resolution
 
 ---
-*Generated by Enhanced RAG Resolver with AWS Intelligence*
+*Generated by Smart RAG Resolver with AWS Intelligence*
 """
         
         # Save report to file
-        report_filename = f"enhanced_resolution_report_{error_log_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        report_filename = f"smart_resolution_report_{error_log_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
         
         with open(report_filename, 'w') as f:
             f.write(report_content)
         
-        print(f"✅ Comprehensive report generated successfully!")
+        print(f"✅ Smart report generated successfully!")
         print(f"   - File: {report_filename}")
         print(f"   - AWS Intelligence Confidence: {aws_investigation.get('resolution_confidence', 0.0):.2f}")
         print(f"   - Recommended Action: {'Auto-execute' if aws_investigation.get('resolution_confidence', 0.0) > 0.8 else 'Review and execute'}")
@@ -341,26 +341,26 @@ AWS Intelligence Confidence: **{aws_investigation.get('resolution_confidence', 0
         return False
 
 def main():
-    """Main CLI function with enhanced capabilities"""
+    """Main CLI function with smart capabilities"""
     parser = argparse.ArgumentParser(
-        description='Enhanced RAG-based Kubernetes Error Resolver with AWS Intelligence',
+        description='Smart RAG-based Kubernetes Error Resolver with AWS Intelligence',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Enhanced Examples:
+Smart Examples:
   # Start the microservice
-  python -m rag_resolver.main serve
+  python main.py serve
 
-  # Test enhanced components
-  python -m rag_resolver.main test
+  # Test smart components
+  python main.py test
 
-  # INTELLIGENTLY resolve error (executes real AWS/K8s commands!)
-  python -m rag_resolver.main resolve --error-id 507f1f77bcf86cd799439011 --auto-execute
+  # SMARTLY resolve error (executes real AWS/K8s commands!)
+  python main.py resolve --error-id 507f1f77bcf86cd799439011 --auto-execute
 
-  # Generate enhanced report with AWS intelligence
-  python -m rag_resolver.main report --error-id 507f1f77bcf86cd799439011
+  # Generate smart report with AWS intelligence
+  python main.py report --error-id 507f1f77bcf86cd799439011
 
   # Get system status
-  python -m rag_resolver.main status
+  python main.py status
 
 Key Features:
   ✅ Automatically checks ECR for correct image tags
@@ -380,7 +380,7 @@ Key Features:
                        help='Error log ID from debug_results collection')
     
     parser.add_argument('--auto-execute', action='store_true',
-                       help='Enable intelligent auto-execution of AWS/K8s commands')
+                       help='Enable smart auto-execution of AWS/K8s commands')
     
     parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                        default='INFO', help='Logging level')
@@ -395,13 +395,13 @@ Key Features:
     
     if args.command == 'serve':
         # Start the microservice
-        print(f"🚀 Starting Enhanced RAG Resolver Service on port {args.port}")
+        print(f"🚀 Starting Smart RAG Resolver Service on port {args.port}")
         print("   Features: AWS Intelligence + Auto-execution + Real command execution")
         start_service()
         
     elif args.command == 'test':
-        # Test enhanced components
-        success = asyncio.run(test_enhanced_components())
+        # Test smart components
+        success = asyncio.run(test_smart_components())
         sys.exit(0 if success else 1)
         
     elif args.command == 'resolve':
@@ -409,14 +409,14 @@ Key Features:
             print("❌ Error ID is required for resolve command")
             sys.exit(1)
         
-        # Intelligently resolve error
-        print("🧠 Using Enhanced RAG Engine with AWS Intelligence")
+        # Smartly resolve error
+        print("🧠 Using Smart RAG Engine with AWS Intelligence")
         print("   This will execute real AWS and kubectl commands!")
         
         if not args.auto_execute:
             print("⚠️  Note: --auto-execute not specified, will only analyze without executing")
         
-        success = asyncio.run(resolve_error_intelligently(args.error_id, args.auto_execute))
+        success = asyncio.run(resolve_error_smartly(args.error_id, args.auto_execute))
         sys.exit(0 if success else 1)
         
     elif args.command == 'report':
@@ -424,14 +424,14 @@ Key Features:
             print("❌ Error ID is required for report command")
             sys.exit(1)
         
-        # Generate enhanced report
-        success = asyncio.run(generate_resolution_report_cli(args.error_id))
+        # Generate smart report
+        success = asyncio.run(generate_smart_report_cli(args.error_id))
         sys.exit(0 if success else 1)
         
     elif args.command == 'status':
-        # Get enhanced system status
+        # Get smart system status
         config = load_resolver_config()
-        print("📊 Enhanced RAG Resolver System Status")
+        print("📊 Smart RAG Resolver System Status")
         print("=" * 50)
         print(f"Service Name: {config.service_name}")
         print(f"Service Port: {config.service_port}")
@@ -443,7 +443,7 @@ Key Features:
         print(f"Auto Execute: {config.auto_execute_safe_commands}")
         print(f"Max Concurrent: {config.max_concurrent_resolutions}")
         
-        print(f"\n🧠 Enhanced Features:")
+        print(f"\n🧠 Smart Features:")
         print(f"   ✅ AWS Intelligence Investigation")
         print(f"   ✅ Real AWS CLI Command Execution")
         print(f"   ✅ ECR Repository Analysis")
@@ -454,8 +454,8 @@ Key Features:
         
         # Test basic connectivity
         try:
-            success = asyncio.run(test_enhanced_components())
-            print(f"\n🔍 Component Status: {'✅ All Enhanced Features Working' if success else '❌ Some Issues Detected'}")
+            success = asyncio.run(test_smart_components())
+            print(f"\n🔍 Component Status: {'✅ All Smart Features Working' if success else '❌ Some Issues Detected'}")
         except Exception as e:
             print(f"\n❌ Status check failed: {e}")
 
