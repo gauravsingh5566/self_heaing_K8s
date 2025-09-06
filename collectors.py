@@ -50,112 +50,92 @@ class PodLogsCollector(BaseCollector):
                 try:
                     # ✅ Case 1: Pod is Running/Finished → Fetch normal logs
                     if pod.status.phase in ['Running', 'Failed', 'Succeeded']:
-                        logs = self.k8s_client.read_namespaced_pod_log(
-                            name=pod.metadata.name,
-                            namespace=pod.metadata.namespace,
-                            tail_lines=self.config.logging.tail_lines,
-                            timestamps=True
-                        )
-                        
-                        if logs:
-                            log_entry = LogEntryFactory.create_container_log(pod, logs, self.config)
-                            log_entries.append(log_entry)
+                        try:
+                            logs = self.k8s_client.read_namespaced_pod_log(
+                                name=pod.metadata.name,
+                                namespace=pod.metadata.namespace,
+                                tail_lines=self.config.logging.tail_lines,
+                                timestamps=True
+                            )
                             
-                            if log_entry.has_error:
-                                error_count += 1
-                                logger.warning(f"Error detected in pod {pod.metadata.name}: {log_entry.error_type}")
+                            if logs:
+                                log_entry = LogEntryFactory.create_container_log(pod, logs, self.config)
+                                log_entries.append(log_entry)
+                                
+                                if log_entry.has_error:
+                                    error_count += 1
+                                    logger.warning(f"Error detected in pod {pod.metadata.name}: {log_entry.error_type}")
+                        except Exception as e:
+                            logger.debug(f"Could not get logs for running pod {pod.metadata.name}: {e}")
 
                     # ✅ Case 2: Pod not producing logs (Pending, ImagePullBackOff, etc.)
-                    else:
-                        diagnostic_messages = []
-                        detected_errors = []
+                    # Create diagnostic entries for these pods
+                    elif pod.status.phase in ['Pending', 'Unknown']:
+                        # Analyze why the pod is not running
+                        diagnostic_info = self._analyze_pod_issues(pod)
+                        
+                        has_error = True
+                        error_type = diagnostic_info.get('primary_issue', 'scheduling')
+                        error_severity = diagnostic_info.get('severity', 'MEDIUM')
+                        
+                        # Create diagnostic log entry
+                        diag_entry = LogEntry(
+                            timestamp=datetime.now(timezone.utc),
+                            log_type="pod_diagnostics",
+                            source="pod_diagnostics",
+                            namespace=pod.metadata.namespace,
+                            resource_name=pod.metadata.name,
+                            message=diagnostic_info.get('message', f"Pod {pod.metadata.name} is {pod.status.phase}"),
+                            level="WARNING" if error_severity in ['LOW', 'MEDIUM'] else "ERROR",
+                            metadata={
+                                "pod_phase": pod.status.phase,
+                                "node_name": pod.spec.node_name,
+                                "labels": pod.metadata.labels or {},
+                                "diagnostic_type": "pod_status",
+                                "issues": diagnostic_info.get('issues', []),
+                                "node_selectors": pod.spec.node_selector or {},
+                                "tolerations": [str(t) for t in (pod.spec.tolerations or [])]
+                            },
+                            has_error=has_error,
+                            error_type=error_type,
+                            error_severity=error_severity
+                        )
+                        log_entries.append(diag_entry)
+                        error_count += 1
+                        
+                        logger.warning(f"Pod scheduling issue detected: {pod.metadata.name} - {error_type}: {diagnostic_info.get('message')}")
 
-                        # Container status diagnostics with error detection
-                        for cs in pod.status.container_statuses or []:
-                            if cs.state.waiting:
-                                message = f"Container {cs.name} is waiting: {cs.state.waiting.reason} - {cs.state.waiting.message}"
-                                diagnostic_messages.append(message)
+                    # ✅ Case 3: Container status issues (ImagePullBackOff, CrashLoopBackOff, etc.)
+                    if pod.status.container_statuses:
+                        for container_status in pod.status.container_statuses:
+                            if container_status.state and not container_status.state.running:
+                                container_issue = self._analyze_container_state(container_status, pod)
                                 
-                                # Check if this is an error condition
-                                has_error, error_type, severity = self.error_detector.detect_error(message)
-                                if has_error:
-                                    detected_errors.append((error_type, severity))
-                            
-                            elif cs.state.terminated:
-                                message = f"Container {cs.name} terminated: exit code {cs.state.terminated.exit_code}, reason: {cs.state.terminated.reason}"
-                                diagnostic_messages.append(message)
-                                
-                                # Terminated with non-zero exit code is usually an error
-                                if cs.state.terminated.exit_code != 0:
-                                    detected_errors.append(("container", "HIGH"))
-
-                        # Pod condition diagnostics
-                        if pod.status.conditions:
-                            for condition in pod.status.conditions:
-                                if condition.status == "False" and condition.type in ["PodReadyCondition", "ContainersReady"]:
-                                    message = f"Pod condition {condition.type}: {condition.reason} - {condition.message}"
-                                    diagnostic_messages.append(message)
-                                    detected_errors.append(("container", "MEDIUM"))
-
-                        # Pod-related events with error detection
-                        try:
-                            events = self.k8s_client.list_namespaced_event(namespace=pod.metadata.namespace)
-                            for event in events.items:
-                                if (event.involved_object.name == pod.metadata.name and 
-                                    event.involved_object.kind == "Pod"):
-                                    event_msg = f"Event: [{event.last_timestamp}] {event.message}"
-                                    diagnostic_messages.append(event_msg)
-                                    
-                                    # Check event for errors
-                                    has_error, error_type, severity = self.error_detector.detect_error(event.message, event.type)
-                                    if has_error:
-                                        detected_errors.append((error_type, severity))
-                        except Exception as e:
-                            logger.debug(f"Could not fetch events for pod {pod.metadata.name}: {e}")
-
-                        # Create diagnostic log entry if we have messages
-                        if diagnostic_messages:
-                            diagnostics_text = "\n".join(diagnostic_messages)
-                            
-                            # Determine overall error status
-                            has_error = len(detected_errors) > 0
-                            error_type = None
-                            error_severity = "INFO"
-                            
-                            if detected_errors:
-                                # Use the most severe error
-                                severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
-                                most_severe = min(detected_errors, key=lambda x: severity_order.get(x[1], 4))
-                                error_type = most_severe[0]
-                                error_severity = most_severe[1]
-                                error_count += 1
-                            
-                            # Create the diagnostic entry manually since we need custom error info
-                            diag_entry = LogEntry(
-                                timestamp=datetime.now(timezone.utc),
-                                log_type="container_logs",
-                                source="pod_diagnostics",
-                                namespace=pod.metadata.namespace,
-                                resource_name=pod.metadata.name,
-                                message=diagnostics_text,
-                                level="WARNING" if has_error else "INFO",
-                                metadata={
-                                    "pod_phase": pod.status.phase,
-                                    "node_name": pod.spec.node_name,
-                                    "labels": pod.metadata.labels or {},
-                                    "diagnostic_type": "pod_status"
-                                },
-                                has_error=has_error,
-                                error_type=error_type,
-                                error_severity=error_severity
-                            )
-                            log_entries.append(diag_entry)
-                            
-                            if has_error:
-                                logger.warning(f"Error detected in pod {pod.metadata.name} diagnostics: {error_type}")
+                                if container_issue['has_error']:
+                                    container_entry = LogEntry(
+                                        timestamp=datetime.now(timezone.utc),
+                                        log_type="container_diagnostics",
+                                        source="container_diagnostics",
+                                        namespace=pod.metadata.namespace,
+                                        resource_name=f"{pod.metadata.name}/{container_status.name}",
+                                        message=container_issue['message'],
+                                        level="ERROR" if container_issue['severity'] in ['HIGH', 'CRITICAL'] else "WARNING",
+                                        metadata={
+                                            "container_name": container_status.name,
+                                            "pod_phase": pod.status.phase,
+                                            "container_state": container_issue['state_type'],
+                                            "restart_count": container_status.restart_count,
+                                            "image": container_status.image
+                                        },
+                                        has_error=True,
+                                        error_type=container_issue['error_type'],
+                                        error_severity=container_issue['severity']
+                                    )
+                                    log_entries.append(container_entry)
+                                    error_count += 1
 
                 except Exception as e:
-                    logger.debug(f"Could not get logs for pod {pod.metadata.name}: {e}")
+                    logger.debug(f"Could not analyze pod {pod.metadata.name}: {e}")
                     
                     # Create an error entry for the collection failure if it seems significant
                     if "Forbidden" in str(e) or "Unauthorized" in str(e):
@@ -181,6 +161,127 @@ class PodLogsCollector(BaseCollector):
         logger.info(f"Collected {len(log_entries)} pod log entries, {error_count} with errors")
         return log_entries
 
+    def _analyze_pod_issues(self, pod) -> Dict[str, Any]:
+        """Analyze why a pod is not running and return diagnostic information"""
+        issues = []
+        primary_issue = "unknown"
+        severity = "MEDIUM"
+        message = f"Pod {pod.metadata.name} is {pod.status.phase}"
+        
+        # Check node selector issues
+        if pod.spec.node_selector:
+            issues.append(f"Node selector required: {pod.spec.node_selector}")
+            primary_issue = "node_selector_mismatch"
+            message = f"Pod requires nodes with labels {pod.spec.node_selector} but none available"
+            severity = "HIGH"
+        
+        # Check scheduling conditions
+        if pod.status.conditions:
+            for condition in pod.status.conditions:
+                if condition.type == "PodScheduled" and condition.status == "False":
+                    if condition.reason:
+                        issues.append(f"Scheduling issue: {condition.reason}")
+                        if condition.message:
+                            issues.append(f"Details: {condition.message}")
+                            message = condition.message
+                    
+                    # Determine specific scheduling issues
+                    if "node affinity" in condition.message.lower() or "node selector" in condition.message.lower():
+                        primary_issue = "node_selector_mismatch"
+                        severity = "HIGH"
+                    elif "insufficient" in condition.message.lower():
+                        primary_issue = "resource_shortage"
+                        severity = "CRITICAL"
+                    elif "taint" in condition.message.lower():
+                        primary_issue = "node_taints"
+                        severity = "MEDIUM"
+        
+        # Check resource requests vs availability
+        if pod.spec.containers:
+            for container in pod.spec.containers:
+                if container.resources and container.resources.requests:
+                    cpu_req = container.resources.requests.get('cpu')
+                    memory_req = container.resources.requests.get('memory')
+                    if cpu_req or memory_req:
+                        issues.append(f"Resource requests: CPU={cpu_req}, Memory={memory_req}")
+        
+        # Check tolerations
+        if pod.spec.tolerations:
+            issues.append(f"Has {len(pod.spec.tolerations)} tolerations")
+        
+        # Check if stuck for too long
+        if pod.metadata.creation_timestamp:
+            age = datetime.now(timezone.utc) - pod.metadata.creation_timestamp.replace(tzinfo=timezone.utc)
+            if age.total_seconds() > 300:  # 5 minutes
+                issues.append(f"Pod stuck for {age}")
+                if age.total_seconds() > 900:  # 15 minutes
+                    severity = "HIGH"
+        
+        return {
+            "issues": issues,
+            "primary_issue": primary_issue,
+            "severity": severity,
+            "message": message,
+            "node_selector": pod.spec.node_selector or {},
+            "pod_phase": pod.status.phase,
+            "age_seconds": age.total_seconds() if pod.metadata.creation_timestamp else 0
+        }
+
+    def _analyze_container_state(self, container_status, pod) -> Dict[str, Any]:
+        """Analyze container state issues"""
+        has_error = False
+        error_type = "unknown"
+        severity = "MEDIUM"
+        message = f"Container {container_status.name} status unknown"
+        state_type = "unknown"
+        
+        if container_status.state.waiting:
+            has_error = True
+            state_type = "waiting"
+            reason = container_status.state.waiting.reason
+            
+            if reason == "ImagePullBackOff":
+                error_type = "image_pull"
+                severity = "HIGH"
+                message = f"Cannot pull image: {container_status.image}"
+            elif reason == "ErrImagePull":
+                error_type = "image_pull"
+                severity = "HIGH"
+                message = f"Error pulling image: {container_status.image}"
+            elif reason == "InvalidImageName":
+                error_type = "image_pull"
+                severity = "CRITICAL"
+                message = f"Invalid image name: {container_status.image}"
+            elif reason == "CreateContainerConfigError":
+                error_type = "config"
+                severity = "HIGH"
+                message = f"Container configuration error: {container_status.state.waiting.message}"
+            else:
+                error_type = "container_waiting"
+                message = f"Container waiting: {reason}"
+        
+        elif container_status.state.terminated:
+            has_error = True
+            state_type = "terminated"
+            reason = container_status.state.terminated.reason
+            exit_code = container_status.state.terminated.exit_code
+            
+            if exit_code != 0:
+                error_type = "container_crash"
+                severity = "HIGH" if container_status.restart_count > 3 else "MEDIUM"
+                message = f"Container crashed with exit code {exit_code}, restarts: {container_status.restart_count}"
+            else:
+                has_error = False  # Normal termination
+                message = f"Container terminated normally: {reason}"
+        
+        return {
+            "has_error": has_error,
+            "error_type": error_type,
+            "severity": severity,
+            "message": message,
+            "state_type": state_type,
+            "restart_count": container_status.restart_count
+        }
 
 class EventsCollector(BaseCollector):
     """Enhanced collector for Kubernetes events with error classification"""
