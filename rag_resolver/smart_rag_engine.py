@@ -1,749 +1,652 @@
 #!/usr/bin/env python3
 """
-Smart RAG Engine that can intelligently execute AWS and Kubernetes commands
-to automatically resolve issues instead of just generating reports
+AI-Powered Smart RAG Engine that acts like an expert EKS administrator
+Generates intelligent, dynamic commands based on error context and cluster state
 """
 
+import asyncio
 import json
 import logging
-import asyncio
-from datetime import datetime
-from typing import Dict, List, Any, Optional, Tuple
 import boto3
-from botocore.exceptions import ClientError
-
-from .config import ResolverConfig, RESOLUTION_TEMPLATES, parse_bedrock_response
-from .vector_store import VectorStore
-from .mcp_executor import MCPExecutor
-from .aws_intelligence import AWSIntelligence
-from .aws_executor import AWSExecutor
+import re
+from datetime import datetime, timezone
+from typing import Dict, List, Any, Optional, Tuple
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-class SmartRAGEngine:
-    """Smart RAG-based intelligent resolution engine with actual execution capabilities"""
+@dataclass
+class AIResolutionPlan:
+    """AI-generated resolution plan with intelligent commands"""
+    error_analysis: Dict[str, Any]
+    diagnosis_strategy: List[str]
+    diagnosis_commands: List[str]
+    fix_strategy: List[str]
+    fix_commands: List[str]
+    validation_commands: List[str]
+    risk_assessment: Dict[str, Any]
+    confidence_score: float
+    reasoning: str
+
+class ExpertEKSAI:
+    """AI that acts like an expert EKS administrator"""
     
-    def __init__(self, config: ResolverConfig):
+    def __init__(self, config):
         self.config = config
-        self.vector_store = VectorStore(config)
-        self.mcp_executor = MCPExecutor(config)  # Keep for safety validation
-        self.aws_intelligence = AWSIntelligence(config)
-        self.aws_executor = AWSExecutor(config)  # New intelligent executor
-        self.bedrock_client = self._init_bedrock_client()
+        self.bedrock_client = boto3.client(
+            'bedrock-runtime',
+            region_name=config.aws.region,
+            profile_name=config.aws.profile
+        )
         
-        # Execution settings
-        self.enable_smart_execution = True
-        self.max_retries = 3
-        self.retry_delay = 2
+        # EKS expert knowledge base
+        self.eks_knowledge = {
+            "node_selectors": {
+                "common_labels": ["kubernetes.io/arch", "kubernetes.io/os", "node.kubernetes.io/instance-type", 
+                                "topology.kubernetes.io/zone", "eks.amazonaws.com/nodegroup"],
+                "troubleshooting_steps": [
+                    "Check node labels and taints",
+                    "Verify nodeSelector matches available nodes", 
+                    "Check for resource constraints",
+                    "Validate node group configuration"
+                ]
+            },
+            "image_pull_errors": {
+                "common_causes": ["ECR authentication", "Network policies", "Image not found", "Registry down"],
+                "investigation_areas": ["IAM roles", "VPC endpoints", "Security groups", "Image URI format"]
+            },
+            "resource_limits": {
+                "memory_patterns": ["OOMKilled", "memory pressure", "limit exceeded"],
+                "cpu_patterns": ["throttling", "cpu limit", "performance degradation"],
+                "resolution_strategies": ["increase limits", "optimize resources", "horizontal scaling"]
+            }
+        }
     
-    def _init_bedrock_client(self):
-        """Initialize AWS Bedrock client for LLM inference"""
+    async def analyze_error_with_ai(self, error_data: Dict[str, Any], 
+                                  cluster_context: Dict[str, Any] = None) -> AIResolutionPlan:
+        """Generate intelligent resolution plan using AI with EKS expertise"""
+        
+        # Build comprehensive context for AI analysis
+        context = await self._build_intelligent_context(error_data, cluster_context)
+        
+        # Generate AI-powered analysis
+        expert_prompt = self._create_expert_eks_prompt(error_data, context)
+        
         try:
-            session = boto3.Session(
-                profile_name=self.config.aws.profile,
-                region_name=self.config.aws.region
-            )
-            return session.client('bedrock-runtime')
+            # Call AI model for expert analysis
+            ai_response = await self._call_ai_model(expert_prompt)
+            
+            # Parse AI response into structured plan
+            resolution_plan = self._parse_ai_resolution_plan(ai_response, error_data)
+            
+            logger.info(f"🤖 AI generated resolution plan with {resolution_plan.confidence_score:.2f} confidence")
+            return resolution_plan
+            
         except Exception as e:
-            logger.error(f"Failed to initialize Bedrock client: {e}")
+            logger.error(f"AI analysis failed, falling back to rule-based approach: {e}")
+            return await self._fallback_expert_analysis(error_data, context)
+    
+    async def _build_intelligent_context(self, error_data: Dict[str, Any], 
+                                       cluster_context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Build comprehensive context for AI analysis"""
+        
+        context = {
+            "error_details": error_data,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "cluster_info": cluster_context or {},
+            "similar_errors": [],
+            "cluster_state": {}
+        }
+        
+        # Add EKS-specific context based on error type
+        error_type = error_data.get('error_type', 'unknown')
+        
+        if error_type in self.eks_knowledge:
+            context["eks_knowledge"] = self.eks_knowledge[error_type]
+        
+        # Add resource context if available
+        if error_data.get('pod_name'):
+            context["resource_context"] = {
+                "pod": error_data.get('pod_name'),
+                "namespace": error_data.get('namespace', 'default'),
+                "node": error_data.get('node_name'),
+                "container_info": error_data.get('container_info', {})
+            }
+        
+        return context
+    
+    def _create_expert_eks_prompt(self, error_data: Dict[str, Any], context: Dict[str, Any]) -> str:
+        """Create expert-level prompt for AI analysis"""
+        
+        error_type = error_data.get('error_type', 'unknown')
+        pod_name = error_data.get('pod_name', 'unknown')
+        namespace = error_data.get('namespace', 'default')
+        error_message = error_data.get('error_message', '')
+        node_name = error_data.get('node_name', 'unknown')
+        
+        prompt = f"""
+You are a Senior AWS EKS Administrator with 10+ years of experience managing large-scale Kubernetes clusters on AWS. 
+You have deep expertise in:
+- EKS cluster architecture and networking
+- AWS IAM, VPC, and security best practices  
+- Kubernetes workload troubleshooting
+- Container image management with ECR
+- Node group management and auto-scaling
+- AWS Load Balancers and Ingress controllers
+
+CURRENT SITUATION:
+Error Type: {error_type}
+Pod: {pod_name}
+Namespace: {namespace}
+Node: {node_name}
+Error Message: {error_message}
+
+CLUSTER CONTEXT:
+{json.dumps(context.get('cluster_info', {}), indent=2)}
+
+RESOURCE CONTEXT:
+{json.dumps(context.get('resource_context', {}), indent=2)}
+
+As an expert, you need to:
+
+1. ANALYZE the root cause with deep EKS knowledge
+2. CREATE a strategic diagnosis plan with specific kubectl/aws commands
+3. GENERATE intelligent fix commands that address the actual problem
+4. PROVIDE validation steps to ensure the fix works
+5. ASSESS risks and provide rollback strategies
+
+Please provide your expert analysis in this EXACT JSON format:
+
+{{
+    "error_analysis": {{
+        "root_cause": "Detailed root cause analysis",
+        "contributing_factors": ["factor1", "factor2"],
+        "impact_assessment": "High/Medium/Low",
+        "similar_patterns": ["pattern1", "pattern2"]
+    }},
+    "diagnosis_strategy": [
+        "Strategy step 1: why this step",
+        "Strategy step 2: what we're looking for",
+        "Strategy step 3: how this helps"
+    ],
+    "diagnosis_commands": [
+        "kubectl get nodes -l kubernetes.io/arch=amd64 --show-labels",
+        "kubectl describe pod {pod_name} -n {namespace}",
+        "kubectl get events -n {namespace} --field-selector involvedObject.name={pod_name} --sort-by='.lastTimestamp'"
+    ],
+    "fix_strategy": [
+        "Fix approach 1: explanation",
+        "Fix approach 2: why this works",
+        "Fix approach 3: expected outcome"
+    ],
+    "fix_commands": [
+        "kubectl patch deployment deployment-name -n {namespace} -p '{{\\"spec\\": {{\\"template\\": {{\\"spec\\": {{\\"nodeSelector\\": {{\\"kubernetes.io/arch\\": \\"amd64\\"}}}}}}}}}'",
+        "kubectl rollout restart deployment/deployment-name -n {namespace}",
+        "kubectl scale deployment deployment-name --replicas=3 -n {namespace}"
+    ],
+    "validation_commands": [
+        "kubectl get pods -n {namespace} -l app=app-name",
+        "kubectl describe pod -n {namespace} -l app=app-name",
+        "kubectl logs -n {namespace} -l app=app-name --tail=10"
+    ],
+    "risk_assessment": {{
+        "risk_level": "Low/Medium/High", 
+        "potential_impacts": ["impact1", "impact2"],
+        "rollback_commands": ["rollback1", "rollback2"],
+        "safety_checks": ["check1", "check2"]
+    }},
+    "confidence_score": 0.85,
+    "reasoning": "Detailed explanation of why this approach will work and the expected outcomes"
+}}
+
+IMPORTANT: 
+- Replace {{pod_name}}, {{namespace}} etc. with actual values: {pod_name}, {namespace}
+- Use REAL kubectl commands that will work on an actual EKS cluster
+- Be specific about node selectors, labels, and AWS-specific configurations
+- Consider EKS-specific features like managed node groups, Fargate, etc.
+- Include AWS CLI commands if needed for ECR, IAM, or VPC troubleshooting
+"""
+        
+        return prompt
+    
+    async def _call_ai_model(self, prompt: str) -> str:
+        """Call AI model for expert analysis"""
+        
+        request_body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 4000,
+            "temperature": 0.2,  # Low temperature for consistent expert responses
+            "messages": [
+                {
+                    "role": "user", 
+                    "content": prompt
+                }
+            ]
+        }
+        
+        try:
+            response = self.bedrock_client.invoke_model(
+                modelId="anthropic.claude-3-sonnet-20240229-v1:0",
+                body=json.dumps(request_body)
+            )
+            
+            response_body = json.loads(response['body'].read())
+            return response_body['content'][0]['text']
+            
+        except Exception as e:
+            logger.error(f"Error calling AI model: {e}")
             raise
     
-    def validate_error_data(self, error_data: Dict[str, Any]) -> bool:
-        """Validate error data structure"""
-        required_fields = ["error_type", "namespace", "pod_name"]
-        return all(field in error_data and error_data[field] for field in required_fields)
+    def _parse_ai_resolution_plan(self, ai_response: str, error_data: Dict[str, Any]) -> AIResolutionPlan:
+        """Parse AI response into structured resolution plan"""
+        
+        try:
+            # Extract JSON from AI response
+            json_match = re.search(r'\{.*\}', ai_response, re.DOTALL)
+            if not json_match:
+                raise ValueError("No JSON found in AI response")
+            
+            ai_plan = json.loads(json_match.group())
+            
+            # Validate required fields
+            required_fields = ['error_analysis', 'diagnosis_commands', 'fix_commands', 'confidence_score']
+            for field in required_fields:
+                if field not in ai_plan:
+                    raise ValueError(f"Missing required field: {field}")
+            
+            # Create structured resolution plan
+            resolution_plan = AIResolutionPlan(
+                error_analysis=ai_plan.get('error_analysis', {}),
+                diagnosis_strategy=ai_plan.get('diagnosis_strategy', []),
+                diagnosis_commands=ai_plan.get('diagnosis_commands', []),
+                fix_strategy=ai_plan.get('fix_strategy', []),
+                fix_commands=ai_plan.get('fix_commands', []),
+                validation_commands=ai_plan.get('validation_commands', []),
+                risk_assessment=ai_plan.get('risk_assessment', {}),
+                confidence_score=float(ai_plan.get('confidence_score', 0.5)),
+                reasoning=ai_plan.get('reasoning', 'AI-generated resolution plan')
+            )
+            
+            return resolution_plan
+            
+        except Exception as e:
+            logger.error(f"Error parsing AI response: {e}")
+            logger.error(f"AI Response: {ai_response}")
+            raise
+    
+    async def _fallback_expert_analysis(self, error_data: Dict[str, Any], 
+                                      context: Dict[str, Any]) -> AIResolutionPlan:
+        """Fallback expert analysis when AI fails"""
+        
+        error_type = error_data.get('error_type', 'unknown')
+        pod_name = error_data.get('pod_name', 'unknown')
+        namespace = error_data.get('namespace', 'default')
+        
+        # Generate expert-level fallback plan
+        if error_type == 'node_selector_mismatch':
+            return AIResolutionPlan(
+                error_analysis={
+                    "root_cause": "Pod nodeSelector doesn't match any available node labels",
+                    "contributing_factors": ["Incorrect nodeSelector", "Node labels changed", "New deployment"],
+                    "impact_assessment": "High",
+                    "similar_patterns": ["scheduling", "node_affinity"]
+                },
+                diagnosis_strategy=[
+                    "Check current node labels and available architectures",
+                    "Verify pod's nodeSelector requirements",
+                    "Identify the mismatch between requirements and available nodes"
+                ],
+                diagnosis_commands=[
+                    f"kubectl get nodes --show-labels",
+                    f"kubectl describe pod {pod_name} -n {namespace}",
+                    f"kubectl get events -n {namespace} --field-selector involvedObject.name={pod_name}",
+                    f"kubectl get pod {pod_name} -n {namespace} -o yaml | grep -A 10 nodeSelector"
+                ],
+                fix_strategy=[
+                    "Update nodeSelector to match available node labels",
+                    "Add appropriate labels to nodes if needed",
+                    "Restart deployment to apply changes"
+                ],
+                fix_commands=[
+                    f"kubectl patch deployment {pod_name.split('-')[0]} -n {namespace} -p '{{\"spec\": {{\"template\": {{\"spec\": {{\"nodeSelector\": {{\"kubernetes.io/arch\": \"amd64\"}}}}}}}}}'",
+                    f"kubectl rollout restart deployment/{pod_name.split('-')[0]} -n {namespace}"
+                ],
+                validation_commands=[
+                    f"kubectl get pods -n {namespace} -l app={pod_name.split('-')[0]}",
+                    f"kubectl rollout status deployment/{pod_name.split('-')[0]} -n {namespace}"
+                ],
+                risk_assessment={
+                    "risk_level": "Low",
+                    "potential_impacts": ["Temporary pod restart", "Brief service interruption"],
+                    "rollback_commands": [f"kubectl rollout undo deployment/{pod_name.split('-')[0]} -n {namespace}"],
+                    "safety_checks": ["Verify deployment has multiple replicas", "Check readiness probes"]
+                },
+                confidence_score=0.85,
+                reasoning="Node selector mismatch is a common, well-understood issue with straightforward resolution"
+            )
+        
+        # Add more fallback patterns for other error types
+        elif error_type == 'image_pull':
+            return self._generate_image_pull_plan(error_data)
+        elif error_type == 'resource_limit':
+            return self._generate_resource_limit_plan(error_data)
+        else:
+            return self._generate_generic_expert_plan(error_data)
+    
+    def _generate_image_pull_plan(self, error_data: Dict[str, Any]) -> AIResolutionPlan:
+        """Generate expert plan for image pull errors"""
+        pod_name = error_data.get('pod_name', 'unknown')
+        namespace = error_data.get('namespace', 'default')
+        
+        return AIResolutionPlan(
+            error_analysis={
+                "root_cause": "Container image cannot be pulled from registry",
+                "contributing_factors": ["ECR authentication", "Network issues", "Image not found", "IAM permissions"],
+                "impact_assessment": "High",
+                "similar_patterns": ["registry_auth", "network_policy", "iam_role"]
+            },
+            diagnosis_strategy=[
+                "Check image URI and registry accessibility",
+                "Verify ECR authentication and IAM roles",
+                "Investigate network connectivity and VPC endpoints"
+            ],
+            diagnosis_commands=[
+                f"kubectl describe pod {pod_name} -n {namespace}",
+                f"kubectl get events -n {namespace} --field-selector involvedObject.name={pod_name}",
+                f"kubectl get serviceaccount default -n {namespace} -o yaml",
+                "aws ecr describe-repositories --region us-west-2",
+                f"aws sts get-caller-identity"
+            ],
+            fix_strategy=[
+                "Verify ECR repository exists and image tag is correct",
+                "Ensure EKS node IAM role has ECR permissions",
+                "Update image URI if needed and restart deployment"
+            ],
+            fix_commands=[
+                f"kubectl delete pod {pod_name} -n {namespace}",
+                f"kubectl rollout restart deployment/{pod_name.split('-')[0]} -n {namespace}"
+            ],
+            validation_commands=[
+                f"kubectl get pods -n {namespace} -l app={pod_name.split('-')[0]}",
+                f"kubectl logs -n {namespace} -l app={pod_name.split('-')[0]} --tail=20"
+            ],
+            risk_assessment={
+                "risk_level": "Medium",
+                "potential_impacts": ["Service downtime", "Image registry costs"],
+                "rollback_commands": [f"kubectl rollout undo deployment/{pod_name.split('-')[0]} -n {namespace}"],
+                "safety_checks": ["Verify image exists in ECR", "Check IAM policy attachments"]
+            },
+            confidence_score=0.80,
+            reasoning="Image pull errors often stem from ECR authentication or IAM permission issues"
+        )
+    
+    def _generate_resource_limit_plan(self, error_data: Dict[str, Any]) -> AIResolutionPlan:
+        """Generate expert plan for resource limit errors"""
+        pod_name = error_data.get('pod_name', 'unknown')
+        namespace = error_data.get('namespace', 'default')
+        
+        return AIResolutionPlan(
+            error_analysis={
+                "root_cause": "Pod exceeding memory or CPU resource limits",
+                "contributing_factors": ["Undersized limits", "Memory leaks", "Traffic spikes", "Inefficient code"],
+                "impact_assessment": "High",
+                "similar_patterns": ["oom_killed", "cpu_throttling", "resource_quota"]
+            },
+            diagnosis_strategy=[
+                "Analyze current resource usage and limits",
+                "Check historical resource consumption patterns", 
+                "Identify if this is a scaling or optimization issue"
+            ],
+            diagnosis_commands=[
+                f"kubectl describe pod {pod_name} -n {namespace}",
+                f"kubectl top pod {pod_name} -n {namespace}",
+                f"kubectl get events -n {namespace} --field-selector reason=OOMKilled",
+                f"kubectl describe nodes | grep -A 5 'Allocated resources'",
+                f"kubectl get limitranges -n {namespace}"
+            ],
+            fix_strategy=[
+                "Increase resource limits for the deployment",
+                "Enable horizontal pod autoscaling if appropriate",
+                "Consider optimizing application resource usage"
+            ],
+            fix_commands=[
+                f"kubectl patch deployment {pod_name.split('-')[0]} -n {namespace} -p '{{\"spec\": {{\"template\": {{\"spec\": {{\"containers\": [{{\"name\": \"main\", \"resources\": {{\"limits\": {{\"memory\": \"1Gi\", \"cpu\": \"500m\"}}}}}}]}}}}}}}'",
+                f"kubectl rollout restart deployment/{pod_name.split('-')[0]} -n {namespace}"
+            ],
+            validation_commands=[
+                f"kubectl get pods -n {namespace} -l app={pod_name.split('-')[0]}",
+                f"kubectl top pod -n {namespace} -l app={pod_name.split('-')[0]}"
+            ],
+            risk_assessment={
+                "risk_level": "Medium",
+                "potential_impacts": ["Increased node resource usage", "Higher costs"],
+                "rollback_commands": [f"kubectl rollout undo deployment/{pod_name.split('-')[0]} -n {namespace}"],
+                "safety_checks": ["Monitor node resource availability", "Set appropriate resource quotas"]
+            },
+            confidence_score=0.75,
+            reasoning="Resource limit issues require careful balancing of application needs and cluster capacity"
+        )
+    
+    def _generate_generic_expert_plan(self, error_data: Dict[str, Any]) -> AIResolutionPlan:
+        """Generate generic expert plan for unknown error types"""
+        pod_name = error_data.get('pod_name', 'unknown')
+        namespace = error_data.get('namespace', 'default')
+        
+        return AIResolutionPlan(
+            error_analysis={
+                "root_cause": "Unknown error requiring investigation",
+                "contributing_factors": ["Configuration issues", "Resource constraints", "Network problems"],
+                "impact_assessment": "Medium",
+                "similar_patterns": ["general_troubleshooting"]
+            },
+            diagnosis_strategy=[
+                "Gather comprehensive pod and cluster state information",
+                "Check for common EKS issues and misconfigurations",
+                "Analyze logs and events for error patterns"
+            ],
+            diagnosis_commands=[
+                f"kubectl describe pod {pod_name} -n {namespace}",
+                f"kubectl get events -n {namespace} --sort-by='.lastTimestamp'",
+                f"kubectl logs {pod_name} -n {namespace} --tail=50",
+                f"kubectl get all -n {namespace}",
+                "kubectl get nodes --show-labels"
+            ],
+            fix_strategy=[
+                "Apply general troubleshooting steps",
+                "Restart the problematic workload",
+                "Monitor for improvement and gather more data"
+            ],
+            fix_commands=[
+                f"kubectl delete pod {pod_name} -n {namespace}",
+                f"kubectl rollout restart deployment/{pod_name.split('-')[0]} -n {namespace}"
+            ],
+            validation_commands=[
+                f"kubectl get pods -n {namespace} -l app={pod_name.split('-')[0]}",
+                f"kubectl logs -n {namespace} -l app={pod_name.split('-')[0]} --tail=10"
+            ],
+            risk_assessment={
+                "risk_level": "Low",
+                "potential_impacts": ["Temporary service interruption"],
+                "rollback_commands": [f"kubectl rollout undo deployment/{pod_name.split('-')[0]} -n {namespace}"],
+                "safety_checks": ["Verify deployment health after restart"]
+            },
+            confidence_score=0.60,
+            reasoning="Generic troubleshooting approach for unknown issues with standard EKS best practices"
+        )
+
+
+class AISmartRAGEngine:
+    """AI-Powered Smart RAG Engine with Expert EKS Knowledge"""
+    
+    def __init__(self, config):
+        self.config = config
+        self.expert_ai = ExpertEKSAI(config)
+        
+        # Import other components
+        from .mcp_executor import MCPExecutor
+        from .aws_executor import AWSExecutor  
+        from .vector_store import VectorStore
+        
+        self.mcp_executor = MCPExecutor(config, log_to_console=True, log_to_file=True)
+        self.aws_executor = AWSExecutor(config)
+        self.vector_store = VectorStore(config)
+        
+        logger.info("🤖 AI-Powered Smart RAG Engine initialized with Expert EKS knowledge")
     
     async def resolve_error_smartly(self, error_data: Dict[str, Any], 
                                   auto_execute: bool = True) -> Dict[str, Any]:
-        """
-        SMART: Intelligently resolve errors by actually executing AWS/K8s commands
-        """
-        if not self.validate_error_data(error_data):
-            return {
-                "resolution_id": None,
-                "success": False,
-                "error": "Invalid error data: missing required fields",
-                "resolution_type": "failed"
-            }
+        """Resolve error using AI-generated expert knowledge"""
         
-        resolution_start = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
         error_type = error_data.get('error_type', 'unknown')
         
-        logger.info(f"🚀 Starting SMART resolution for {error_type} error")
+        logger.info(f"🤖 Starting AI-powered resolution for {error_type} error")
         
         try:
-            # Step 1: AWS Intelligence Investigation
-            aws_investigation = await self._perform_aws_investigation(error_data)
-            logger.info(f"AWS Investigation confidence: {aws_investigation.get('resolution_confidence', 0.0):.2f}")
+            # Step 1: AI Analysis - Generate expert resolution plan
+            logger.info("🧠 Step 1: AI Expert Analysis - Generating intelligent resolution plan...")
+            ai_plan = await self.expert_ai.analyze_error_with_ai(error_data)
             
-            # Step 2: Execute smart resolution based on error type
-            if self.enable_smart_execution and auto_execute:
-                execution_results = await self._execute_smart_resolution_by_type(
-                    error_data, aws_investigation
+            logger.info(f"✅ AI generated plan with {ai_plan.confidence_score:.2f} confidence")
+            logger.info(f"🎯 Root cause: {ai_plan.error_analysis.get('root_cause', 'Unknown')}")
+            
+            # Step 2: Execute AI-generated diagnosis commands
+            logger.info("🔍 Step 2: Executing AI-generated diagnosis commands...")
+            session_id = self.mcp_executor.create_session(error_data.get('namespace', 'default'))
+            
+            diagnosis_results = await self.mcp_executor.execute_diagnosis_commands(
+                session_id, ai_plan.diagnosis_commands
+            )
+            
+            # Step 3: Execute AI-generated fix commands (if auto_execute)
+            execution_results = {"success": False, "steps": []}
+            
+            if auto_execute and ai_plan.confidence_score > 0.7:
+                logger.info("🛠️ Step 3: Executing AI-generated fix commands...")
+                
+                fix_results = await self.mcp_executor.execute_fix_commands(
+                    session_id, ai_plan.fix_commands, confirm_dangerous=True
                 )
+                
+                # Convert results to steps
+                steps = []
+                for strategy, command in zip(ai_plan.fix_strategy, ai_plan.fix_commands):
+                    result = fix_results.get(command)
+                    if result:
+                        steps.append({
+                            "step": strategy,
+                            "success": result.success,
+                            "command": command,
+                            "result": result.output if result.success else result.error
+                        })
+                
+                execution_results = {
+                    "success": all(r.success for r in fix_results.values() if r),
+                    "steps": steps,
+                    "results": fix_results
+                }
             else:
+                logger.info("⚠️ Step 3: Skipping auto-execution (confidence too low or disabled)")
                 execution_results = {
                     "success": False,
-                    "reason": "Smart execution disabled or auto_execute=False",
+                    "message": f"Auto-execution skipped (confidence: {ai_plan.confidence_score:.2f})",
                     "steps": []
                 }
             
-            # Step 3: Validate resolution success
-            validation_results = await self._validate_smart_resolution(
-                error_data, execution_results
-            )
+            # Step 4: Validation using AI-generated commands
+            validation_results = {"success": False}
+            if execution_results.get("success") and ai_plan.validation_commands:
+                logger.info("✅ Step 4: Validating resolution using AI-generated commands...")
+                
+                validation_command_results = await self.mcp_executor.execute_diagnosis_commands(
+                    session_id, ai_plan.validation_commands
+                )
+                
+                # Simple validation: if validation commands succeed, resolution is likely successful
+                validation_results = {
+                    "success": all(r.success for r in validation_command_results.values()),
+                    "validation_type": "ai_generated",
+                    "commands_executed": len(validation_command_results),
+                    "message": "AI-generated validation completed"
+                }
             
-            # Step 4: Store resolution knowledge
-            smart_resolution_data = {
-                **error_data,
-                "aws_investigation": aws_investigation,
+            # Cleanup session
+            self.mcp_executor.close_session(session_id)
+            
+            # Calculate duration
+            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+            
+            # Store resolution knowledge
+            resolution_data = {
+                "error_data": error_data,
+                "ai_plan": {
+                    "error_analysis": ai_plan.error_analysis,
+                    "fix_strategy": ai_plan.fix_strategy,
+                    "confidence_score": ai_plan.confidence_score,
+                    "reasoning": ai_plan.reasoning
+                },
                 "execution_results": execution_results,
                 "validation_results": validation_results,
-                "resolution_duration": (datetime.utcnow() - resolution_start).total_seconds(),
-                "smart_execution": True,
-                "auto_resolved": execution_results.get("success", False)
+                "resolution_type": "ai_powered",
+                "duration": duration,
+                "auto_executed": auto_execute,
+                "success": execution_results.get("success", False)
             }
             
-            resolution_id = await self._store_resolution_knowledge(smart_resolution_data)
+            resolution_id = await self._store_resolution_knowledge(resolution_data)
             
+            # Build comprehensive response
             return {
+                "success": execution_results.get("success", False),
                 "resolution_id": resolution_id,
-                "success": validation_results.get("success", False),
-                "resolution_type": "smart_execution",
-                "steps_executed": len(execution_results.get("steps", [])),
+                "resolution_type": "ai_powered",
+                "ai_confidence": ai_plan.confidence_score,
+                "root_cause": ai_plan.error_analysis.get('root_cause'),
+                "fix_strategy": ai_plan.fix_strategy,
                 "execution_results": execution_results,
                 "validation_results": validation_results,
-                "aws_investigation": aws_investigation,
-                "auto_executed": True,
-                "resolution_duration": (datetime.utcnow() - resolution_start).total_seconds(),
-                "recommendations": execution_results.get("recommendations", []),
-                "resolution_summary": execution_results.get("resolution_summary", ""),
-                "intelligence_confidence": aws_investigation.get("resolution_confidence", 0.0),
-                "actual_changes_made": execution_results.get("changes_made", [])
+                "resolution_duration": duration,
+                "auto_executed": auto_execute,
+                "intelligence_confidence": ai_plan.confidence_score,
+                "resolution_summary": f"AI-powered resolution: {ai_plan.reasoning}",
+                "steps_executed": len(execution_results.get("steps", [])),
+                "actual_changes_made": [
+                    step["step"] for step in execution_results.get("steps", []) 
+                    if step.get("success")
+                ],
+                "recommendations": ai_plan.fix_strategy,
+                "risk_assessment": ai_plan.risk_assessment
             }
             
         except Exception as e:
-            logger.error(f"Smart resolution failed: {e}")
+            logger.error(f"AI-powered resolution failed: {e}")
+            duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+            
             return {
-                "resolution_id": None,
                 "success": False,
+                "resolution_type": "ai_powered_failed",
                 "error": str(e),
-                "resolution_type": "failed",
-                "resolution_duration": (datetime.utcnow() - resolution_start).total_seconds(),
-                "smart_execution": True
-            }
-    
-    async def _execute_smart_resolution_by_type(self, error_data: Dict[str, Any], 
-                                              aws_investigation: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute smart resolution based on error type"""
-        error_type = error_data.get('error_type', 'unknown')
-        
-        logger.info(f"🎯 Executing smart resolution for {error_type} error")
-        
-        try:
-            if error_type == 'image_pull':
-                return await self.aws_executor.intelligent_image_pull_resolution(error_data)
-            
-            elif error_type == 'resource_limit':
-                return await self.aws_executor.intelligent_resource_limit_resolution(error_data)
-            
-            elif error_type == 'network':
-                return await self.aws_executor.intelligent_network_resolution(error_data)
-            
-            elif error_type == 'storage':
-                return await self._execute_storage_resolution(error_data)
-            
-            elif error_type == 'node':
-                return await self._execute_node_resolution(error_data, aws_investigation)
-            
-            else:
-                # Generic resolution approach
-                return await self._execute_generic_resolution(error_data, aws_investigation)
-        
-        except Exception as e:
-            logger.error(f"Error executing smart resolution: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "steps": []
-            }
-    
-    async def _execute_storage_resolution(self, error_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Smartly resolve storage issues"""
-        pod_name = error_data.get('pod_name', '')
-        namespace = error_data.get('namespace', 'default')
-        
-        resolution_steps = []
-        
-        try:
-            # Step 1: Check PVC status
-            logger.info("💾 Step 1: Checking PVC status...")
-            pvc_cmd = f"kubectl get pvc -n {namespace} -o json"
-            pvc_result = await self.aws_executor._execute_command(pvc_cmd)
-            
-            if pvc_result.success:
-                pvc_data = json.loads(pvc_result.output)
-                
-                for pvc in pvc_data.get('items', []):
-                    pvc_name = pvc['metadata']['name']
-                    pvc_status = pvc['status']['phase']
-                    
-                    resolution_steps.append({
-                        "step": f"Check PVC {pvc_name}",
-                        "success": True,
-                        "pvc_status": pvc_status
-                    })
-                    
-                    # If PVC is pending, try to fix it
-                    if pvc_status == 'Pending':
-                        logger.info(f"🔧 Attempting to fix pending PVC {pvc_name}")
-                        
-                        # Check storage classes
-                        sc_cmd = "kubectl get storageclass -o json"
-                        sc_result = await self.aws_executor._execute_command(sc_cmd)
-                        
-                        if sc_result.success:
-                            sc_data = json.loads(sc_result.output)
-                            
-                            # Find default storage class
-                            default_sc = None
-                            for sc in sc_data.get('items', []):
-                                annotations = sc.get('metadata', {}).get('annotations', {})
-                                if annotations.get('storageclass.kubernetes.io/is-default-class') == 'true':
-                                    default_sc = sc['metadata']['name']
-                                    break
-                            
-                            if default_sc:
-                                # Update PVC to use default storage class
-                                patch_cmd = f'kubectl patch pvc {pvc_name} -n {namespace} -p \'{{"spec":{{"storageClassName":"{default_sc}"}}}}\''
-                                patch_result = await self.aws_executor._execute_command(patch_cmd)
-                                
-                                resolution_steps.append({
-                                    "step": f"Update PVC storage class",
-                                    "success": patch_result.success,
-                                    "storage_class": default_sc
-                                })
-            
-            # Step 2: Restart pod to retry mounting
-            logger.info("🔄 Step 2: Restarting pod to retry storage mounting...")
-            delete_cmd = f"kubectl delete pod {pod_name} -n {namespace}"
-            delete_result = await self.aws_executor._execute_command(delete_cmd)
-            
-            resolution_steps.append({
-                "step": "Restart pod for storage retry",
-                "success": delete_result.success,
-                "result": delete_result.output
-            })
-            
-            return {
-                "success": delete_result.success,
-                "steps": resolution_steps,
-                "resolution_summary": "Fixed storage issues and restarted pod",
-                "changes_made": [f"Restarted pod {pod_name} to retry storage mounting"]
-            }
-            
-        except Exception as e:
-            resolution_steps.append({
-                "step": "Storage resolution failed",
-                "success": False,
-                "error": str(e)
-            })
-        
-        return {"success": False, "steps": resolution_steps}
-    
-    async def _execute_node_resolution(self, error_data: Dict[str, Any], 
-                                     aws_investigation: Dict[str, Any]) -> Dict[str, Any]:
-        """Smartly resolve node issues using AWS services"""
-        resolution_steps = []
-        
-        try:
-            # Step 1: Check if we need to scale node groups
-            logger.info("🖥️ Step 1: Checking EKS node group capacity...")
-            
-            cluster_name = self.config.aws.cluster_name
-            
-            # List node groups
-            list_ng_cmd = f"aws eks list-nodegroups --cluster-name {cluster_name} --region {self.config.aws.region} --profile {self.config.aws.profile}"
-            ng_result = await self.aws_executor._execute_command(list_ng_cmd)
-            
-            if ng_result.success:
-                ng_data = json.loads(ng_result.output)
-                
-                for ng_name in ng_data.get('nodegroups', []):
-                    # Get node group details
-                    describe_cmd = f"aws eks describe-nodegroup --cluster-name {cluster_name} --nodegroup-name {ng_name} --region {self.config.aws.region} --profile {self.config.aws.profile}"
-                    ng_details_result = await self.aws_executor._execute_command(describe_cmd)
-                    
-                    if ng_details_result.success:
-                        ng_details = json.loads(ng_details_result.output)
-                        nodegroup = ng_details['nodegroup']
-                        
-                        scaling_config = nodegroup.get('scalingConfig', {})
-                        desired = scaling_config.get('desiredSize', 0)
-                        max_size = scaling_config.get('maxSize', 0)
-                        
-                        resolution_steps.append({
-                            "step": f"Check node group {ng_name}",
-                            "success": True,
-                            "desired_size": desired,
-                            "max_size": max_size
-                        })
-                        
-                        # If we can scale up, do it
-                        if desired < max_size:
-                            logger.info(f"⬆️ Scaling up node group {ng_name} from {desired} to {desired + 1}")
-                            
-                            scale_cmd = f"aws eks update-nodegroup-config --cluster-name {cluster_name} --nodegroup-name {ng_name} --scaling-config desiredSize={desired + 1} --region {self.config.aws.region} --profile {self.config.aws.profile}"
-                            scale_result = await self.aws_executor._execute_command(scale_cmd)
-                            
-                            resolution_steps.append({
-                                "step": f"Scale up node group {ng_name}",
-                                "success": scale_result.success,
-                                "new_desired_size": desired + 1
-                            })
-                            
-                            if scale_result.success:
-                                return {
-                                    "success": True,
-                                    "steps": resolution_steps,
-                                    "resolution_summary": f"Scaled up node group {ng_name} to add capacity",
-                                    "changes_made": [f"Node group {ng_name} scaled from {desired} to {desired + 1}"]
-                                }
-            
-            # Step 2: Check for problematic nodes and cordon them
-            logger.info("🔧 Step 2: Checking for problematic nodes...")
-            nodes_cmd = "kubectl get nodes -o json"
-            nodes_result = await self.aws_executor._execute_command(nodes_cmd)
-            
-            if nodes_result.success:
-                nodes_data = json.loads(nodes_result.output)
-                
-                for node in nodes_data.get('items', []):
-                    node_name = node['metadata']['name']
-                    conditions = node.get('status', {}).get('conditions', [])
-                    
-                    # Check if node is in bad state
-                    is_ready = False
-                    has_issues = False
-                    
-                    for condition in conditions:
-                        if condition['type'] == 'Ready':
-                            is_ready = condition['status'] == 'True'
-                        elif condition['type'] in ['MemoryPressure', 'DiskPressure', 'PIDPressure']:
-                            if condition['status'] == 'True':
-                                has_issues = True
-                    
-                    if not is_ready or has_issues:
-                        logger.info(f"🚫 Node {node_name} has issues, cordoning...")
-                        
-                        # Cordon the problematic node
-                        cordon_cmd = f"kubectl cordon {node_name}"
-                        cordon_result = await self.aws_executor._execute_command(cordon_cmd)
-                        
-                        resolution_steps.append({
-                            "step": f"Cordon problematic node {node_name}",
-                            "success": cordon_result.success,
-                            "node_issues": {"ready": is_ready, "pressure": has_issues}
-                        })
-            
-            return {
-                "success": len([s for s in resolution_steps if s["success"]]) > 0,
-                "steps": resolution_steps,
-                "resolution_summary": "Performed node maintenance and capacity adjustments",
-                "changes_made": [f"Performed {len(resolution_steps)} node maintenance actions"]
-            }
-            
-        except Exception as e:
-            resolution_steps.append({
-                "step": "Node resolution failed",
-                "success": False,
-                "error": str(e)
-            })
-        
-        return {"success": False, "steps": resolution_steps}
-    
-    async def _execute_generic_resolution(self, error_data: Dict[str, Any], 
-                                        aws_investigation: Dict[str, Any]) -> Dict[str, Any]:
-        """Generic smart resolution for unknown error types"""
-        pod_name = error_data.get('pod_name', '')
-        namespace = error_data.get('namespace', 'default')
-        deployment_name = pod_name.split('-')[0] if '-' in pod_name else pod_name
-        
-        resolution_steps = []
-        
-        try:
-            # Step 1: Get comprehensive pod information
-            logger.info("🔍 Step 1: Gathering comprehensive pod information...")
-            describe_cmd = f"kubectl describe pod {pod_name} -n {namespace}"
-            describe_result = await self.aws_executor._execute_command(describe_cmd)
-            
-            resolution_steps.append({
-                "step": "Gather pod information",
-                "success": describe_result.success,
-                "info_length": len(describe_result.output) if describe_result.success else 0
-            })
-            
-            # Step 2: Check events for clues
-            events_cmd = f"kubectl get events -n {namespace} --field-selector involvedObject.name={pod_name} --sort-by='.lastTimestamp'"
-            events_result = await self.aws_executor._execute_command(events_cmd)
-            
-            resolution_steps.append({
-                "step": "Check pod events",
-                "success": events_result.success,
-                "events_found": len(events_result.output.split('\n')) if events_result.success else 0
-            })
-            
-            # Step 3: Apply generic fix - restart deployment
-            logger.info("🔄 Step 3: Applying generic fix - restart deployment...")
-            restart_cmd = f"kubectl rollout restart deployment/{deployment_name} -n {namespace}"
-            restart_result = await self.aws_executor._execute_command(restart_cmd)
-            
-            resolution_steps.append({
-                "step": "Restart deployment",
-                "success": restart_result.success,
-                "result": restart_result.output if restart_result.success else restart_result.error
-            })
-            
-            # Step 4: Wait for rollout
-            if restart_result.success:
-                logger.info("⏳ Step 4: Waiting for deployment rollout...")
-                status_cmd = f"kubectl rollout status deployment/{deployment_name} -n {namespace} --timeout=60s"
-                status_result = await self.aws_executor._execute_command(status_cmd)
-                
-                resolution_steps.append({
-                    "step": "Wait for rollout completion",
-                    "success": status_result.success,
-                    "result": status_result.output
-                })
-                
-                return {
-                    "success": status_result.success,
-                    "steps": resolution_steps,
-                    "resolution_summary": f"Applied generic fix: restarted deployment {deployment_name}",
-                    "changes_made": [f"Deployment {deployment_name} restarted"]
-                }
-            
-            return {
-                "success": restart_result.success,
-                "steps": resolution_steps,
-                "resolution_summary": "Attempted generic resolution"
-            }
-            
-        except Exception as e:
-            resolution_steps.append({
-                "step": "Generic resolution failed",
-                "success": False,
-                "error": str(e)
-            })
-        
-        return {"success": False, "steps": resolution_steps}
-    
-    async def _validate_smart_resolution(self, error_data: Dict[str, Any], 
-                                       execution_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Validate if the smart resolution was successful"""
-        if not execution_results.get("success", False):
-            return {
-                "success": False,
-                "validation_type": "execution_failed",
-                "message": "Resolution execution failed"
-            }
-        
-        try:
-            # Wait a bit for changes to take effect
-            await asyncio.sleep(15)
-            
-            pod_name = error_data.get('pod_name', '')
-            namespace = error_data.get('namespace', 'default')
-            deployment_name = pod_name.split('-')[0] if '-' in pod_name else pod_name
-            
-            # Check if deployment is healthy
-            status_cmd = f"kubectl get deployment {deployment_name} -n {namespace} -o json"
-            status_result = await self.aws_executor._execute_command(status_cmd)
-            
-            if status_result.success:
-                deployment_data = json.loads(status_result.output)
-                status = deployment_data.get('status', {})
-                
-                ready_replicas = status.get('readyReplicas', 0)
-                desired_replicas = status.get('replicas', 1)
-                
-                is_healthy = ready_replicas >= desired_replicas
-                
-                return {
-                    "success": is_healthy,
-                    "validation_type": "deployment_health_check",
-                    "ready_replicas": ready_replicas,
-                    "desired_replicas": desired_replicas,
-                    "message": "Deployment is healthy" if is_healthy else "Deployment still has issues"
-                }
-            
-            return {
-                "success": False,
-                "validation_type": "validation_error",
-                "message": "Could not validate deployment status"
-            }
-            
-        except Exception as e:
-            logger.error(f"Error validating resolution: {e}")
-            return {
-                "success": False,
-                "validation_type": "validation_error",
-                "message": f"Validation failed: {str(e)}"
-            }
-    
-    # Keep all the existing methods from the original RAG engine
-    async def _perform_aws_investigation(self, error_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Perform intelligent AWS investigation based on error type"""
-        error_type = error_data.get('error_type', 'unknown')
-        
-        logger.info(f"Starting AWS intelligence investigation for {error_type} error")
-        
-        try:
-            if error_type == 'image_pull':
-                return await self.aws_intelligence.investigate_image_pull_error(error_data)
-            elif error_type == 'resource_limit':
-                return await self.aws_intelligence.investigate_resource_limit_error(error_data)
-            elif error_type == 'network':
-                return await self.aws_intelligence.investigate_network_error(error_data)
-            elif error_type == 'node':
-                return await self.aws_intelligence.investigate_node_error(error_data)
-            else:
-                return {
-                    "error_type": error_type,
-                    "findings": ["AWS intelligence investigation not available for this error type"],
-                    "recommendations": ["Use smart execution approach"],
-                    "suggested_commands": [],
-                    "resolution_confidence": 0.7  # Higher confidence for smart execution
-                }
-        except Exception as e:
-            logger.error(f"AWS investigation failed: {e}")
-            return {
-                "error_type": error_type,
-                "findings": [f"AWS investigation error: {str(e)}"],
-                "recommendations": ["Proceed with smart execution"],
-                "suggested_commands": [],
-                "resolution_confidence": 0.5
+                "resolution_duration": duration,
+                "auto_executed": auto_execute,
+                "intelligence_confidence": 0.0,
+                "resolution_summary": f"AI-powered resolution failed: {e}"
             }
     
     async def _store_resolution_knowledge(self, resolution_data: Dict[str, Any]) -> str:
-        """Store the resolution knowledge in vector store"""
+        """Store AI-generated resolution knowledge"""
         try:
             resolution_id = self.vector_store.store_resolution(resolution_data)
-            logger.info(f"Stored resolution knowledge: {resolution_id}")
+            logger.info(f"Stored AI resolution knowledge: {resolution_id}")
             return resolution_id
         except Exception as e:
-            logger.error(f"Error storing resolution knowledge: {e}")
+            logger.error(f"Error storing AI resolution knowledge: {e}")
             return ""
     
-    # Wrapper method to maintain compatibility
-    async def resolve_error(self, error_data: Dict[str, Any], 
-                          auto_execute: bool = None) -> Dict[str, Any]:
-        """Main resolve_error method that uses smart execution"""
-        auto_execute = auto_execute if auto_execute is not None else True
-        return await self.resolve_error_smartly(error_data, auto_execute)
-    
-    # Keep all other existing methods for compatibility
-    def get_resolution_stats(self) -> Dict[str, Any]:
-        """Get resolution statistics"""
+    async def close(self):
+        """Close all connections and cleanup"""
         try:
-            return self.vector_store.get_resolution_stats()
-        except Exception as e:
-            logger.error(f"Error getting resolution stats: {e}")
-            return {"error": str(e)}
-    
-    async def get_resolution_status(self, resolution_id: str) -> Dict[str, Any]:
-        """Get the status of a resolution"""
-        try:
-            resolution_data = self.vector_store.get_resolution_by_id(resolution_id)
-            
-            if not resolution_data:
-                return {"error": "Resolution not found"}
-            
-            metadata = resolution_data.get("metadata", {})
-            
-            return {
-                "resolution_id": resolution_id,
-                "error_type": metadata.get("error_type"),
-                "success": metadata.get("success", False),
-                "auto_resolved": metadata.get("auto_resolved", False),
-                "created_at": metadata.get("created_at"),
-                "namespace": metadata.get("namespace"),
-                "resolution_type": metadata.get("resolution_type", "unknown"),
-                "smart_execution": metadata.get("intelligence_used", False)
-            }
-            
-        except Exception as e:
-            logger.error(f"Error getting resolution status: {e}")
-            return {"error": str(e)}
-    
-    async def update_resolution_feedback(self, resolution_id: str, success: bool, 
-                                       feedback: str = None) -> bool:
-        """Update resolution feedback for learning"""
-        try:
-            self.vector_store.update_resolution_success(resolution_id, success, feedback)
-            logger.info(f"Updated resolution feedback: {resolution_id} -> {success}")
-            return True
-        except Exception as e:
-            logger.error(f"Error updating resolution feedback: {e}")
-            return False
-    
-    def close(self):
-        """Close all connections"""
-        try:
+            await self.mcp_executor.close()
             self.vector_store.close()
-            # Clean up any active MCP sessions
-            for session_id in list(self.mcp_executor.active_sessions.keys()):
-                self.mcp_executor.close_session(session_id)
-            logger.info("Smart RAG engine closed successfully")
+            logger.info("🤖 AI Smart RAG engine closed successfully")
         except Exception as e:
-            logger.error(f"Error closing smart RAG engine: {e}")
-
-    async def intelligent_resource_limit_resolution(self, error_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Intelligently resolve resource limit errors"""
-        pod_name = error_data.get('pod_name', '')
-        namespace = error_data.get('namespace', 'default')
-        deployment_name = pod_name.split('-')[0] if '-' in pod_name else pod_name
-        
-        resolution_steps = []
-        
-        try:
-            # Step 1: Check current resource limits
-            logger.info("🔍 Step 1: Checking current resource limits...")
-            limits_cmd = f"kubectl get deployment {deployment_name} -n {namespace} -o jsonpath='{{.spec.template.spec.containers[0].resources}}'"
-            limits_result = await self.aws_executor._execute_command(limits_cmd)
-            
-            if limits_result.success:
-                try:
-                    current_resources = json.loads(limits_result.output)
-                except:
-                    current_resources = {}
-                
-                resolution_steps.append({
-                    "step": "Check current resources",
-                    "success": True,
-                    "current_resources": current_resources
-                })
-                
-                # Step 2: Increase resource limits
-                logger.info("⬆️ Step 2: Increasing resource limits...")
-                new_limits = {
-                    "limits": {
-                        "memory": "1Gi",
-                        "cpu": "500m"
-                    },
-                    "requests": {
-                        "memory": "512Mi", 
-                        "cpu": "250m"
-                    }
-                }
-                
-                # Apply new resource limits
-                patch_json = {
-                    "spec": {
-                        "template": {
-                            "spec": {
-                                "containers": [
-                                    {
-                                        "name": deployment_name,
-                                        "resources": new_limits
-                                    }
-                                ]
-                            }
-                        }
-                    }
-                }
-                
-                patch_cmd = f"kubectl patch deployment {deployment_name} -n {namespace} -p '{json.dumps(patch_json)}'"
-                patch_result = await self.aws_executor._execute_command(patch_cmd)
-                
-                resolution_steps.append({
-                    "step": "Update resource limits",
-                    "success": patch_result.success,
-                    "new_limits": new_limits,
-                    "error": patch_result.error if not patch_result.success else None
-                })
-                
-                if patch_result.success:
-                    # Step 3: Wait for rollout
-                    logger.info("⏳ Step 3: Waiting for deployment rollout...")
-                    rollout_cmd = f"kubectl rollout status deployment/{deployment_name} -n {namespace} --timeout=60s"
-                    rollout_result = await self.aws_executor._execute_command(rollout_cmd)
-                    
-                    resolution_steps.append({
-                        "step": "Wait for rollout",
-                        "success": rollout_result.success,
-                        "result": rollout_result.output
-                    })
-                    
-                    return {
-                        "success": rollout_result.success,
-                        "steps": resolution_steps,
-                        "resolution_summary": f"Increased resource limits for {deployment_name}",
-                        "changes_made": [f"Updated {deployment_name} resource limits to 1Gi memory, 500m CPU"]
-                    }
-            
-        except Exception as e:
-            resolution_steps.append({
-                "step": "Resource resolution failed",
-                "success": False,
-                "error": str(e)
-            })
-        
-        return {"success": False, "steps": resolution_steps}
-    
-    async def intelligent_network_resolution(self, error_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Intelligently resolve network errors"""
-        pod_name = error_data.get('pod_name', '')
-        namespace = error_data.get('namespace', 'default')
-        
-        resolution_steps = []
-        
-        try:
-            # Step 1: Check service discovery
-            logger.info("🌐 Step 1: Checking service discovery...")
-            services_cmd = f"kubectl get svc -n {namespace}"
-            services_result = await self.aws_executor._execute_command(services_cmd)
-            
-            resolution_steps.append({
-                "step": "Check services",
-                "success": services_result.success,
-                "services": services_result.output if services_result.success else services_result.error
-            })
-            
-            # Step 2: Check network policies
-            logger.info("🔒 Step 2: Checking network policies...")
-            netpol_cmd = f"kubectl get networkpolicies -n {namespace}"
-            netpol_result = await self.aws_executor._execute_command(netpol_cmd)
-            
-            resolution_steps.append({
-                "step": "Check network policies",
-                "success": netpol_result.success,
-                "policies": netpol_result.output
-            })
-            
-            # Step 3: Restart pod to reset network
-            logger.info("🔄 Step 3: Restarting pod to reset network...")
-            delete_cmd = f"kubectl delete pod {pod_name} -n {namespace}"
-            delete_result = await self.aws_executor._execute_command(delete_cmd)
-            
-            resolution_steps.append({
-                "step": "Restart pod",
-                "success": delete_result.success,
-                "result": delete_result.output
-            })
-            
-            return {
-                "success": delete_result.success,
-                "steps": resolution_steps,
-                "resolution_summary": "Restarted pod to reset network connectivity",
-                "changes_made": [f"Restarted pod {pod_name} to reset networking"]
-            }
-            
-        except Exception as e:
-            resolution_steps.append({
-                "step": "Network resolution failed",
-                "success": False,
-                "error": str(e)
-            })
-        
-        return {"success": False, "steps": resolution_steps}
+            logger.error(f"Error closing AI Smart RAG engine: {e}")
