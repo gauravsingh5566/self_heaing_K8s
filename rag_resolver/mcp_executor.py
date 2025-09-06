@@ -93,13 +93,7 @@ class MCPExecutor:
         return session_id
     
     def validate_command(self, command: str, namespace: str = None) -> Tuple[bool, str, str]:
-        """
-        Validate kubectl command for safety and security
-        
-        Returns:
-            (is_safe, safety_level, reason)
-        """
-        # Parse command
+        """Validate kubectl command for safety and security"""
         try:
             parts = shlex.split(command)
         except ValueError as e:
@@ -113,27 +107,21 @@ class MCPExecutor:
         
         action = parts[1].lower()
         
-        # Check against dangerous commands
         if action in DANGEROUS_KUBECTL_COMMANDS:
             return False, "dangerous", f"Command '{action}' is not allowed for safety reasons"
         
-        # Check against safe commands
         if action in SAFE_KUBECTL_COMMANDS:
             safety_level = "safe"
         else:
             safety_level = "moderate"
         
-        # Validate namespace if specified
         if namespace and namespace not in self.config.mcp.allowed_namespaces:
             return False, "restricted", f"Namespace '{namespace}' is not in allowed list"
         
-        # Additional validation for specific commands
         if action == "delete":
-            # Never allow delete commands
             return False, "dangerous", "Delete operations are not permitted"
         
         if action in ["apply", "create", "patch"]:
-            # Check for dangerous resource modifications
             if any(dangerous in command.lower() for dangerous in ["--force", "--grace-period=0"]):
                 return False, "dangerous", "Forced operations are not permitted"
         
@@ -237,6 +225,75 @@ class MCPExecutor:
                 command=command,
                 safe=is_safe
             )
+    
+    def format_command_template(self, command_template: str, variables: Dict[str, str]) -> str:
+        """FIXED: Format command template with provided variables and proper error handling"""
+        try:
+            # Handle both {variable} and {0}, {1} style formatting
+            
+            # First, try named formatting with variables dict
+            try:
+                return command_template.format(**variables)
+            except KeyError as e:
+                logger.warning(f"Missing variable in command template: {e}")
+                # Continue to positional formatting attempt
+            
+            # If named formatting fails, try positional formatting
+            # Extract values in order of common kubernetes variables
+            common_vars = ["pod_name", "namespace", "deployment_name", "container_name", "node_name"]
+            var_values = []
+            
+            for var in common_vars:
+                if var in variables:
+                    var_values.append(variables[var])
+            
+            # Try positional formatting if we have values
+            if var_values:
+                try:
+                    return command_template.format(*var_values)
+                except (IndexError, ValueError) as e:
+                    logger.warning(f"Positional formatting failed: {e}")
+            
+            # If all formatting fails, do manual replacement for common patterns
+            formatted_command = command_template
+            
+            # Replace common kubernetes placeholders
+            replacements = {
+                "{pod_name}": variables.get("pod_name", "UNKNOWN_POD"),
+                "{namespace}": variables.get("namespace", "default"),
+                "{deployment_name}": variables.get("deployment_name", "UNKNOWN_DEPLOYMENT"),
+                "{container_name}": variables.get("container_name", "main"),
+                "{node_name}": variables.get("node_name", "UNKNOWN_NODE")
+            }
+            
+            for placeholder, value in replacements.items():
+                formatted_command = formatted_command.replace(placeholder, value)
+            
+            # Handle numbered placeholders like {0}, {1}, etc.
+            for i, value in enumerate(var_values):
+                placeholder = "{" + str(i) + "}"
+                formatted_command = formatted_command.replace(placeholder, value)
+            
+            return formatted_command
+            
+        except Exception as e:
+            logger.error(f"Error formatting command template: {e}")
+            logger.error(f"Template: {command_template}")
+            logger.error(f"Variables: {variables}")
+            
+            # Return a safe fallback command
+            pod_name = variables.get("pod_name", "UNKNOWN_POD")
+            namespace = variables.get("namespace", "default")
+            
+            if "describe" in command_template.lower():
+                return f"kubectl describe pod {pod_name} -n {namespace}"
+            elif "get" in command_template.lower() and "pod" in command_template.lower():
+                return f"kubectl get pod {pod_name} -n {namespace}"
+            elif "logs" in command_template.lower():
+                return f"kubectl logs {pod_name} -n {namespace}"
+            else:
+                # Generic fallback
+                return f"kubectl get pod {pod_name} -n {namespace}"
     
     async def execute_diagnosis_commands(self, session_id: str, 
                                        commands: List[str]) -> Dict[str, CommandResult]:
@@ -426,72 +483,3 @@ class MCPExecutor:
                 safe_commands.append(cmd)
         
         return safe_commands
-    
-    def format_command_template(self, command_template: str, variables: Dict[str, str]) -> str:
-        """FIXED: Format command template with provided variables and proper error handling"""
-        try:
-            # Handle both {variable} and {0}, {1} style formatting
-            
-            # First, try named formatting with variables dict
-            try:
-                return command_template.format(**variables)
-            except KeyError as e:
-                logger.warning(f"Missing variable in command template: {e}")
-                # Continue to positional formatting attempt
-            
-            # If named formatting fails, try positional formatting
-            # Extract values in order of common kubernetes variables
-            common_vars = ["pod_name", "namespace", "deployment_name", "container_name", "node_name"]
-            var_values = []
-            
-            for var in common_vars:
-                if var in variables:
-                    var_values.append(variables[var])
-            
-            # Try positional formatting if we have values
-            if var_values:
-                try:
-                    return command_template.format(*var_values)
-                except (IndexError, ValueError) as e:
-                    logger.warning(f"Positional formatting failed: {e}")
-            
-            # If all formatting fails, do manual replacement for common patterns
-            formatted_command = command_template
-            
-            # Replace common kubernetes placeholders
-            replacements = {
-                "{pod_name}": variables.get("pod_name", "UNKNOWN_POD"),
-                "{namespace}": variables.get("namespace", "default"),
-                "{deployment_name}": variables.get("deployment_name", "UNKNOWN_DEPLOYMENT"),
-                "{container_name}": variables.get("container_name", "main"),
-                "{node_name}": variables.get("node_name", "UNKNOWN_NODE")
-            }
-            
-            for placeholder, value in replacements.items():
-                formatted_command = formatted_command.replace(placeholder, value)
-            
-            # Handle numbered placeholders like {0}, {1}, etc.
-            for i, value in enumerate(var_values):
-                placeholder = "{" + str(i) + "}"
-                formatted_command = formatted_command.replace(placeholder, value)
-            
-            return formatted_command
-            
-        except Exception as e:
-            logger.error(f"Error formatting command template: {e}")
-            logger.error(f"Template: {command_template}")
-            logger.error(f"Variables: {variables}")
-            
-            # Return a safe fallback command
-            pod_name = variables.get("pod_name", "UNKNOWN_POD")
-            namespace = variables.get("namespace", "default")
-            
-            if "describe" in command_template.lower():
-                return f"kubectl describe pod {pod_name} -n {namespace}"
-            elif "get" in command_template.lower() and "pod" in command_template.lower():
-                return f"kubectl get pod {pod_name} -n {namespace}"
-            elif "logs" in command_template.lower():
-                return f"kubectl logs {pod_name} -n {namespace}"
-            else:
-                # Generic fallback
-                return f"kubectl get pod {pod_name} -n {namespace}"

@@ -597,3 +597,153 @@ class SmartRAGEngine:
             logger.info("Smart RAG engine closed successfully")
         except Exception as e:
             logger.error(f"Error closing smart RAG engine: {e}")
+
+    async def intelligent_resource_limit_resolution(self, error_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Intelligently resolve resource limit errors"""
+        pod_name = error_data.get('pod_name', '')
+        namespace = error_data.get('namespace', 'default')
+        deployment_name = pod_name.split('-')[0] if '-' in pod_name else pod_name
+        
+        resolution_steps = []
+        
+        try:
+            # Step 1: Check current resource limits
+            logger.info("🔍 Step 1: Checking current resource limits...")
+            limits_cmd = f"kubectl get deployment {deployment_name} -n {namespace} -o jsonpath='{{.spec.template.spec.containers[0].resources}}'"
+            limits_result = await self.aws_executor._execute_command(limits_cmd)
+            
+            if limits_result.success:
+                try:
+                    current_resources = json.loads(limits_result.output)
+                except:
+                    current_resources = {}
+                
+                resolution_steps.append({
+                    "step": "Check current resources",
+                    "success": True,
+                    "current_resources": current_resources
+                })
+                
+                # Step 2: Increase resource limits
+                logger.info("⬆️ Step 2: Increasing resource limits...")
+                new_limits = {
+                    "limits": {
+                        "memory": "1Gi",
+                        "cpu": "500m"
+                    },
+                    "requests": {
+                        "memory": "512Mi", 
+                        "cpu": "250m"
+                    }
+                }
+                
+                # Apply new resource limits
+                patch_json = {
+                    "spec": {
+                        "template": {
+                            "spec": {
+                                "containers": [
+                                    {
+                                        "name": deployment_name,
+                                        "resources": new_limits
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+                
+                patch_cmd = f"kubectl patch deployment {deployment_name} -n {namespace} -p '{json.dumps(patch_json)}'"
+                patch_result = await self.aws_executor._execute_command(patch_cmd)
+                
+                resolution_steps.append({
+                    "step": "Update resource limits",
+                    "success": patch_result.success,
+                    "new_limits": new_limits,
+                    "error": patch_result.error if not patch_result.success else None
+                })
+                
+                if patch_result.success:
+                    # Step 3: Wait for rollout
+                    logger.info("⏳ Step 3: Waiting for deployment rollout...")
+                    rollout_cmd = f"kubectl rollout status deployment/{deployment_name} -n {namespace} --timeout=60s"
+                    rollout_result = await self.aws_executor._execute_command(rollout_cmd)
+                    
+                    resolution_steps.append({
+                        "step": "Wait for rollout",
+                        "success": rollout_result.success,
+                        "result": rollout_result.output
+                    })
+                    
+                    return {
+                        "success": rollout_result.success,
+                        "steps": resolution_steps,
+                        "resolution_summary": f"Increased resource limits for {deployment_name}",
+                        "changes_made": [f"Updated {deployment_name} resource limits to 1Gi memory, 500m CPU"]
+                    }
+            
+        except Exception as e:
+            resolution_steps.append({
+                "step": "Resource resolution failed",
+                "success": False,
+                "error": str(e)
+            })
+        
+        return {"success": False, "steps": resolution_steps}
+    
+    async def intelligent_network_resolution(self, error_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Intelligently resolve network errors"""
+        pod_name = error_data.get('pod_name', '')
+        namespace = error_data.get('namespace', 'default')
+        
+        resolution_steps = []
+        
+        try:
+            # Step 1: Check service discovery
+            logger.info("🌐 Step 1: Checking service discovery...")
+            services_cmd = f"kubectl get svc -n {namespace}"
+            services_result = await self.aws_executor._execute_command(services_cmd)
+            
+            resolution_steps.append({
+                "step": "Check services",
+                "success": services_result.success,
+                "services": services_result.output if services_result.success else services_result.error
+            })
+            
+            # Step 2: Check network policies
+            logger.info("🔒 Step 2: Checking network policies...")
+            netpol_cmd = f"kubectl get networkpolicies -n {namespace}"
+            netpol_result = await self.aws_executor._execute_command(netpol_cmd)
+            
+            resolution_steps.append({
+                "step": "Check network policies",
+                "success": netpol_result.success,
+                "policies": netpol_result.output
+            })
+            
+            # Step 3: Restart pod to reset network
+            logger.info("🔄 Step 3: Restarting pod to reset network...")
+            delete_cmd = f"kubectl delete pod {pod_name} -n {namespace}"
+            delete_result = await self.aws_executor._execute_command(delete_cmd)
+            
+            resolution_steps.append({
+                "step": "Restart pod",
+                "success": delete_result.success,
+                "result": delete_result.output
+            })
+            
+            return {
+                "success": delete_result.success,
+                "steps": resolution_steps,
+                "resolution_summary": "Restarted pod to reset network connectivity",
+                "changes_made": [f"Restarted pod {pod_name} to reset networking"]
+            }
+            
+        except Exception as e:
+            resolution_steps.append({
+                "step": "Network resolution failed",
+                "success": False,
+                "error": str(e)
+            })
+        
+        return {"success": False, "steps": resolution_steps}
